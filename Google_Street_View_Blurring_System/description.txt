@@ -2,41 +2,55 @@ Bluring System for Google Street View
 
 Business task: protect the personal data + minimize the cost of manual labor for car plate bluring
 
-FT
 
+FT:
 - blur human faces and car plates on GSV
 - process any types of car plates
-- consider that the racial distribution of human faces isn't uniform (but for simplicity we won't consider that)
+- tackle with biased racial distribution of human faces
 - user can complain about the face/car plate which was not blurred
+- some pictures can randomly be sent to operator for manual verification of blur correctness
 
-NFT
 
+NFT:
 - how many photos in total? 100M
-- how many photos per day? Suppose that million per day -> RPS ~ 10
-- is system latency critical? Don't think so, users can use previous processed photos until new photos are processing by the system
+- how many new photos per day? Suppose that million per day -> RPS ~ 10 -> load on system is low
+- is system latency critical? Don't think so, users can use previous photos until new photos are processed
 
 
 ML task:
-- object segmentation (because we need to detect and mask exactly car plate or exactly human face and don't touch any other objects nearby which can decrease informativity of photo)
+- semantic segmentation (because we need to detect and mask exactly car plate or exactly human face and don't touch any other objects nearby which can decrease informativity of photo 
+    + if e.g. multiple faces are close to each other - we don't need to separate them from each other - just blur them together)
 - do we have labeled dataset for this task? 1 million of labeled photos
+
 
 Data:
  - photo
  - dataset: (object type (face, plate), photo URL, array of masked pixel coordinates)
  - metadata: timestamp, coordinates, camera orientation (X, Y, Z angles)
 
+
 Model:
 - preprocess pipeline (resize + convert to universal color scheme (RGB/CMYK))
 - data augmentation (crop, scale, mirror, change colors/brightness/contrast, cutmix, noise)
-- CNN object detector (Fast R-CNN, YOLO)
-- masking head
+- semantic segmentation architecture (U-Net, FCN, DeepLab)
 
-Loss function: for every pixel we should predict if it belongs to mask or not. I think that it should be something like logloss/BCE for every pixel -> average all pixel BCEs for picture + object classifcation BCE * weight
+Loss function: Dice loss + BCE loss
+Dice computes a ratio of overlap mask and real object to total mass of both - it robust to class imbalance
+But Dice is unstable when GT mask is very small or empty (that's why epsilon is added) or saturates when overlap is roughly correct
+That's why Dice is combined with BCE.
+
+Dice = (2 * sum(p_i * g_i) + epsilon) / (sum(p_i^2) + sum(g_i^2) + epsilon), p_i - model prediction for i-th pixel, 
+    g_i - 1 if i-th pixel belongs to class, 0 otherwise; epsilon ~ 1e-8
+Dice loss = 1 - Dice
+BCE loss = - sum(g_i * log(p_i) + (1 - g_i) * log(1 - p_i))
+Total loss = alpha * Dice loss + beta * BCE loss
+
 
 Offline metrics:
 - IOU (intersection over union)
 - mAP (mean Average Precision)
-Threshold for TP/FP should be biased toward higher recall (because FP blur is a small inconvinience but FN blur is a personal data exposure) -> it should be lower
+Threshold for TP/FP should be biased toward higher recall (because FP blur is a small inconvinience but FN blur is a personal data exposure) -> threshold should be lower
+
 
 Online metrics:
 - Number of user complains about not blurred human faces / car plates for the last day/week/month
