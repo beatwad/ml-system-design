@@ -14,7 +14,8 @@ FT:
 NFT:
 - how many photos in total? 100M
 - how many new photos per day? Suppose that million per day -> RPS ~ 10 -> load on system is low
-- is system latency critical? Don't think so, users can use previous photos until new photos are processed
+- is system latency critical? Don't think so, users can use previous photos until new photos are processed, 
+    not latency critical for the blur-production pipeline; the map-lookup/serving path is out of scope for this design
 
 
 ML task:
@@ -27,6 +28,7 @@ Data:
  - photo
  - dataset: (object type (face, plate), photo URL, array of masked pixel coordinates)
  - metadata: timestamp, coordinates, camera orientation (X, Y, Z angles)
+Need to tackle with limited diversity of dataset: split the original dataset into clusters by skin color and use stratified sampling while training
 
 
 Model:
@@ -34,10 +36,12 @@ Model:
 - data augmentation (crop, scale, mirror, change colors/brightness/contrast, cutmix, noise)
 - semantic segmentation architecture (U-Net, FCN, DeepLab)
 
+
 Loss function: Dice loss + BCE loss
 Dice computes a ratio of overlap mask and real object to total mass of both - it robust to class imbalance
 But Dice is unstable when GT mask is very small or empty (that's why epsilon is added) or saturates when overlap is roughly correct
 That's why Dice is combined with BCE.
+
 
 Dice = (2 * sum(p_i * g_i) + epsilon) / (sum(p_i^2) + sum(g_i^2) + epsilon), p_i - model prediction for i-th pixel, 
     g_i - 1 if i-th pixel belongs to class, 0 otherwise; epsilon ~ 1e-8
@@ -49,9 +53,29 @@ Total loss = alpha * Dice loss + beta * BCE loss
 Offline metrics:
 - IOU (intersection over union)
 - mAP (mean Average Precision)
-Threshold for TP/FP should be biased toward higher recall (because FP blur is a small inconvinience but FN blur is a personal data exposure) -> threshold should be lower
+- Prepare golden dataset for evaluation of face bluring for different races and lighting conditions
+- Threshold for TP/FP should be biased toward higher recall (because FP blur is a small inconvinience but FN blur is a personal data exposure) -> threshold should be lower
 
 
 Online metrics:
-- Number of user complains about not blurred human faces / car plates for the last day/week/month
-- Total amount of manual blurrings for the last day/week/month
+- (Number of user complains about not blurred human faces / car plates for the last day/week/month) / (Total number of users for the last day/week/month)
+- (Amount of manual blurrings for the last day/week/month) / (Total amount of processed photos for the last day/week/month)
+
+
+Inference:
+- Train dataset keeps increasing:
+    + Audit service randomly grabs images (the probability can be adjusted by model confidence - the lower model confidence is - the higher probability) 
+    + Audit service asks operator to check images (whether predicted masks are correct)
+    + User complains about not blurred human faces / car plates
+    + Operator fixes them and adds new images with correct masks to train dataset
+
+- Rollout model with 1% of data -> collect metrics -> gradually increase percentage
+- Retrain model when at least 10% of new data are added or performance (measured by Offline and Online metrics) of new model degrades comparing to previous model
+
+GDPR:
+- some images are need to be stored unblurred (for model retraining), but only for internal purpose
+- most original images have TTL (e.g. 30-90 days) because of audit purpose
+- in case of complain from user - TTL for original image can be frozen until complaint is resolved
+- very few roles have access to unblurred images, every access must be logged
+- users have right to request their personal data (including any unblurred images) to be deleted, he/she just need to select image on which he/she (presumably) appears 
+    and send request, his/her data will be indexed by geolocation and if he/she appears in any nearby street view images they all will be deleted too
