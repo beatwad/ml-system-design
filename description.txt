@@ -10,8 +10,11 @@ FT:
 
 NFT:
     - 1 billion videos
-    - 100 million DAU ~ 1000 RPS (suppose that user requests are distributed uniformly over time)
-    - 10 millions of pairs of video-text of train data is available
+    - 100 million DAU ~ 10000 RPS (suppose that user requests are distributed uniformly over time, 
+        each user sends 10 requests per day)
+    - 10 millions of pairs of video-text train data are available
+    - p99 latency is 500 ms
+
 
 ML task:
     system must accept text request and return the list of the most relevant video, sorted by decreasing of 
