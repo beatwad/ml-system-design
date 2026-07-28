@@ -1,0 +1,111 @@
+YouTube Video Search System
+
+Business task: 
+    provide users with more relevand video search results -> increase user engagement -> mode ad/revenue
+
+FT:
+    - return videos (and only videos) that are the most relevant to user's search text
+    - same search result - same output, no user personalization
+    - multiple supported languages for simplicity
+
+NFT:
+    - 1 billion videos
+    - 100 million DAU ~ 1000 RPS (suppose that user requests are distributed uniformly over time)
+    - 10 millions of pairs of video-text of train data is available
+
+ML task:
+    system must accept text request and return the list of the most relevant video, sorted by decreasing of 
+    relevancy - ranging task
+
+Data:
+    - video file
+    - video metadata:
+        - size
+        - timestamp
+        - tags
+        - short description
+        - country
+        - language
+        - location
+        - age restriction
+        - duration
+        - likes/dislikes
+        - views
+        - comments
+    - text request:
+        - timestamp
+        - language 
+        - location
+        - country
+
+    - pair text request - link to video
+
+    First approach:
+    We can create positive pairs using request-video pair and the negative ones using negative sampling.
+    Ratio between positive and negative samples should be 1:1, but we can create much more negative samples
+    (e.g. 100 millions vs 10 million of positive pairs) and on each train epoch subsample from them 10 million ->
+    better diversity and generalization. Binary classification.
+
+    Second approach:
+    CLIP like: build confusion matrix of N x N where rows correspond to N text requests
+    and columns - to N videos. Pairs on matrix diagonal are positives and marked by 1, the rest 
+    are 0. So it's some sort of multiclass classification with N classes.
+
+Loss function:
+    First approach: logloss/BCE
+    Second approach: for each positive text-video pair on confusion matrix diagonal we calculate CE_rows + CE_columns, 
+    where CE_rows is Cross Entropy between text request and N videos from matrix, and CE_columns - vice versa, 
+    CE between current video and N text requests. Then we average this loss for N pairs in matrix.
+
+Model:
+    two-tower neural network:
+    - first tower accepts:
+        - text request (BERT, multilang)
+        - country (embedding)
+        - location (coordinates or name of exact location, numeric or embedding)
+    - second accept:
+        - video embeddings (sequence of frame images, use ViT)
+        - tags (TF-IDF, BM-25, model may depend on language)
+        - short description (BERT, multilang)
+        - country (embedding)
+        - location (coordinates or name of exact location, numeric or embedding)
+    Embeddings from two towers -> cosine simililarity between embeddings -> scale to 0-1 -> loss
+
+Offline metrics:
+    - in case when multiple videos can be relevant to user's request, we can create golden dataset 
+        where relevancy of video and text is measured manually in some range (e.g. 1 to 5) and use NDCG
+    - in case when only one video from search response can be relevant, we use MRR
+
+Online metrics:
+    - CTR
+    - average number of minutes of video watched by users for the last day/week/month
+    - like/watch ratio, comment/watch ratio, subscribe/watch ratio 
+
+Inference:
+    - Pre-calculate embeddings for each new uploaded video using model's video encoder
+    - Pre-calculate tags for each new uploaded video using Tag Service
+    - Store both in video index table
+    - Each user's text request is transformed to embedding by model's text encoder and also key words extracted from it
+    - Find candidates for user request in video index table by search for nearest neighbours for text embedding using ANN/HNSW/PQ/etc.
+    - Find candidates for user request in video index table by using key words and ElasticSearch
+    - The result (e.g. hundreds of embeddings) is sent to Rerank service where two candidate lists are merged and
+        reranked by their cosine simililarity with text embedding
+    - Sorted by descending ranks video links are returned to user
+
+
+TODO:
+- Instead of relying on already labeled data, data can be constructed and labeled based on interactions (clicks, likes, etc.).
+    This enables continuous training of the model.
+- Use an ML model to find titles and tags that are semantically similar to text queries. This model can be combined with Elasticsearch
+    to improve search quality.
+- An important aspect of search systems is query understanding: the system corrects spelling, identifies the query category and recognizes entities.
+    How to build a component that would analyze the meaning of a query?
+- How to build a multimodal system that processes speech and audio to improve search results?
+- How to add support for other languages to this task?
+- Videos that are too similar in the search results can degrade the user experience. How to detect overly similar videos
+    in order to remove them before displaying the results?
+- Text queries can be divided into head, torso and tail. What approaches are usually applied to each
+    of these types?
+- How to account for popularity and freshness of data when composing the output
+    list?
+- How do real-world video search systems work?
