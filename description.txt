@@ -10,8 +10,8 @@ FT:
 
 NFT:
     - 1 billion videos
-    - 100 million DAU ~ 10000 RPS (suppose that user requests are distributed uniformly over time, 
-        each user sends 10 requests per day)
+    - 100 million DAU ~ 30000 RPS (suppose that each user sends 10 requests per day, consider peak
+        load that can be x3 more than usual)
     - 10 millions of pairs of video-text train data are available
     - p99 latency is 500 ms
 
@@ -98,6 +98,9 @@ Train:
     - then distill trained cross-encoder into bi-encoder using soft labels
     - repeat until it stops to improve (usually 2-3 rounds)
     - cross-encoder can be additionally distilled from bigger LLMs (offline teacher)
+    - train LambdaRank on cross-encoder score + video interaction features (populariry, freshness, engagement, etc.),
+        video interaction features should be computed at impression timestamp to avoid train/inference skew -> 
+        video interaction features should be logged
 
     Also both model are updated during system work - system collects users requests and actions 
     (like, comment, subscribe, repost) and builds makes additional labeled data based on that information.
@@ -126,7 +129,8 @@ Inference:
         ANN needs filtered search support (e.g. filtered HNSW), ElasticSearch does it with filter clause.
         Age restriction is compared with viewer's account age/settings - this is the only place where
         request depends on user, ranking itself stays non-personalized
-    - Merge two ranked lists of candidates, merge their ranks too, then sort by merged rank, select top 100
+    - Merge two ranked lists of candidates, fuse their ranks (score = Σ 1/(k + rank_i), k≈60), 
+        then sort by fused rank, select top 100
     - Top 100 candidates are sent to cross-encoder
     - Final reranking with LambdaRank
     - Randomized exploration (on small part of traffic, to collect unbiased train data):
@@ -151,11 +155,12 @@ Latency estimation:
         15 * 10^9 / 3 * 10^14 = 3 * 10^-5) = 30 us
     - Search in Video Index Table (1B elements) - 40 ms (in parallel with ElasticSearch)
     - ElasticSearch (1B elements) - 40 ms (in parallel with Search in Video Index Table)
-    - Merge of two candidate lists (~ 0)
+    - Merge and rerankingof two candidate lists (~ 0)
     - Reranking using cross-encoder (MiniLM-L6: 6 layers * 384 hidden -> ~10.6M non-embedding params,
         embedding table is a lookup and costs no FLOP, so it is not counted):
         FLOP = 2 * 10.6 * 10^6 * (100 candidates * 256 tokens) = 5.4 * 10^11
         t = 5.4 * 10^11 / (3.12 * 10^14 * 0.1 (MFU)) = 1.7 * 10^-2 ~ 17 ms
+    - Reranking with LambdaRank (~ 0)
     - Response - 10 ms
     Total: 177 ms
 
