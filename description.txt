@@ -27,6 +27,7 @@ Data:
         - timestamp
         - tags
         - short description
+        - age restriction
         - duration
         - likes/dislikes
         - views
@@ -42,10 +43,19 @@ Data:
     are 0. So it's some sort of multiclass classification with N classes.
 
 Loss function:
-    Contrastive Loss: -log((exp(sim(i, j))/temp) / (sum(exp(sim(i, k))/temp))), k != i
-    i, j - positive pair, all other pairs are negative ones
-    Loss is calculated for current video and all text request and for current text request and
-    all video -> final loss is the sum of these two
+    Contrastive Loss (InfoNCE), symmetric:
+        t_i, v_i - L2-normalized embeddings of text request i and video i in batch of size N
+        sim(t, v) = cosine similarity = dot product of normalized embeddings
+        temp - learnable temperature (init ~0.07), kept in log-scale and clamped
+
+        text -> video: L_t2v(i) = -log( exp(sim(t_i, v_i)/temp) / sum_k exp(sim(t_i, v_k)/temp) )
+        video -> text: L_v2t(i) = -log( exp(sim(v_i, t_i)/temp) / sum_k exp(sim(v_k, t_i)/temp) )
+
+        L = 1/(2N) * sum_i (L_t2v(i) + L_v2t(i))
+
+    i, i - positive pair, all other pairs in batch are negative ones
+    sum in denominator runs over all k = 1..N (positive included), otherwise it is not a
+    valid softmax over the batch
 
 Model:
     learn embeddings using two-tower neural network (bi-encoder):
@@ -72,6 +82,7 @@ Offline metrics:
     - in case when multiple videos can be relevant to user's request, we can create golden dataset 
         where relevancy of video and text is measured manually in some range (e.g. 1 to 5) and use NDCG
     - in case when only one video from search response can be relevant, we use MRR
+    - Recall@100
 
 Online metrics:
     - CTR
@@ -93,12 +104,19 @@ Train:
 Inference:
     - Pre-calculate embeddings for each new uploaded video using video encoder from bi-encoder model
     - Pre-calculate tags for each new uploaded video using Tag Service
-    - Store both in video index table
+    - Store both in video index table, together with filter attributes (age restriction, region, status)
     - Each user's text request is transformed to embedding by encoder from bi-encoder model and key words are also extracted from it
     - Find candidates for user request in video index table by search for nearest neighbours for text embedding using ANN/HNSW/PQ/etc.
     - Find candidates for user request in video index table by using key words and ElasticSearch
-    - Merge two lists of candidates, rank them by score, select top 100
-    - Top 100 candidates are sent to cross-encoder for final reranking
+    - Both searches are filtered by age restriction (and region/deleted/private status) INSIDE the search,
+        not after it: post-filtering of top-K can return almost empty list if filter is selective.
+        ANN needs filtered search support (e.g. filtered HNSW), ElasticSearch does it with filter clause.
+        Age restriction is compared with viewer's account age/settings - this is the only place where
+        request depends on user, ranking itself stays non-personalized
+    - Merge two ranked lists of candidates, merge their ranks too, then sort by merged rank, select top 100
+    - Top 100 candidates are sent to cross-encoder
+    - Final reranking with LambdaRank
+    - 
     - Search result is returned to user
 
 
@@ -110,10 +128,12 @@ Latency estimation:
     - Search in Video Index Table (1B elements) - 40 ms (in parallel with ElasticSearch)
     - ElasticSearch (1B elements) - 40 ms (in parallel with Search in Video Index Table)
     - Merge of two candidate lists (~ 0)
-    - Reranking using cross-encoder (500 candidates * 256 tokens * 20M params ~ 2.56^12 FLOP / (3.12 * 10^14) * 0.1(MFU) ~ 
-        2.5 * 10^13 / 3.12 * 10^14 ~ 1.5 * 10^-2) ~ 15 ms
+    - Reranking using cross-encoder (MiniLM-L6: 6 layers * 384 hidden -> ~10.6M non-embedding params,
+        embedding table is a lookup and costs no FLOP, so it is not counted):
+        FLOP = 2 * 10.6 * 10^6 * (100 candidates * 256 tokens) = 5.4 * 10^11
+        t = 5.4 * 10^11 / (3.12 * 10^14 * 0.1 (MFU)) = 1.7 * 10^-2) ~ 17 ms
     - Response - 10 ms
-    Total: 175 ms
+    Total: 177 ms
 
 Memory estimation:
     - Video Index Table: 10^9 * 256 * 2 ~ 500 GB RAM (need very big server or sharding)
@@ -128,6 +148,4 @@ TODO:
     in order to remove them before displaying the results?
 - Text queries can be divided into head, torso and tail. What approaches are usually applied to each
     of these types?
-- How to account for popularity and freshness of data when composing the output
-    list?
 - How do real-world video search systems work?
