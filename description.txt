@@ -88,9 +88,26 @@ Offline metrics:
     - Recall@100
 
 Online metrics:
-    - CTR
-    - average number of minutes of video watched by users for the last day/week/month
-    - like/watch ratio, comment/watch ratio, subscribe/watch ratio 
+    - Long-click CTR = (number of long clicks) / impressions
+        long click = watch_time >= max(30 sec, 0.3 * duration)
+        threshold must depend on duration: fixed 30 sec makes every short video a long click
+        and every 40-min lecture a bounce
+        opposite case is pogo-sticking (click -> return back to search page in few seconds) -
+        it is even stronger negative signal than no click at all, because user checked the video
+        and rejected it
+    - Watch-time-weighted CTR = sum_i min(watch_time_i / duration_i, 1) / impressions
+        normalization by duration is needed, otherwise metric prefers long videos:
+        2-hour video watched 10 min would beat 5-min video watched fully
+    - Average number of minutes/seconds of video watched by users for the last day/week/month
+    - Like/watch ratio, comment/watch ratio, subscribe/watch ratio
+    - Abandonment = (number of query results where the user clicked nothing) / (total number of query results)
+        careful with "good abandonment": user could get the answer from titles/thumbnails without click
+    - Query reformulation rate = (queries that were edited and re-sent in the same session) / (all queries)
+        stronger dissatisfaction signal than abandonment - user explicitly says that results are bad
+
+    CTR-like metrics are sensitive but easy to game (clickbait), so long-click CTR is the primary
+    decision metric, and abandonment/reformulation are guardrails that must not degrade:
+    typical bad case is a change that increases CTR and reformulation rate at the same time
 
 Train:
     - first train bi-encoder
@@ -99,8 +116,16 @@ Train:
     - repeat until it stops to improve (usually 2-3 rounds)
     - cross-encoder can be additionally distilled from bigger LLMs (offline teacher)
     - train LambdaRank on cross-encoder score + video interaction features (populariry, freshness, engagement, etc.),
-        video interaction features should be computed at impression timestamp to avoid train/inference skew -> 
+        video interaction features should be computed at impression timestamp to avoid train/inference skew ->
         video interaction features should be logged
+        Label is NOT a raw click (raw CTR is gameable by clickbait), but graded
+        relevance built from satisfaction signals of the same impression:
+            0 - impression without click
+            1 - pogo-sticking (click and fast return to search page) - worse than no click at all
+            2 - click without long watch
+            3 - long click (watch_time >= max(30 sec, 0.3 * duration))
+            4 - long click + explicit positive action (like, comment, subscribe, repost)
+        Use NDCG metric
 
     Also both model are updated during system work - system collects users requests and actions 
     (like, comment, subscribe, repost) and builds makes additional labeled data based on that information.
@@ -116,9 +141,17 @@ Train:
     offline (IPS/doubly robust) before spending A/B traffic on it.
 
 Inference:
-    - Pre-calculate embeddings for each new uploaded video using video encoder from bi-encoder model
-    - Pre-calculate tags for each new uploaded video using Tag Service
-    - Store both in video index table, together with filter attributes (age restriction, region, status)
+
+  Indexing pipeline (offline, once per uploaded video - NOT per query):
+    - Calculate embeddings for each new uploaded video using video encoder from bi-encoder model
+    - Calculate transcript (audio -> ASR) and its embedding, transcript is cached and reused on retrains
+    - Calculate tags for each new uploaded video using Tag Service
+    - Store all of them in video index table, together with filter attributes
+        (age restriction, region, language, status) and text fields for ElasticSearch
+
+  Serving pipeline (online, per user query):
+    - Pre-process user's query (stemming, lemmatization), add filters
+    - Ask Cache if the result is in it, if cash hit - return the result and don't go further
     - Each user's text request is transformed to embedding by encoder from bi-encoder model and key words are also extracted from it
     - Find candidates for user request in video index table by search for nearest neighbours for text embedding using ANN/HNSW/PQ/etc.
     - Find candidates for user request in video index table by using key words and ElasticSearch
@@ -147,22 +180,32 @@ Inference:
         - cost of exploration is measured as separate A/B arm (CTR/watch time delta vs control)
     - Search result is returned to user
 
+    Text preprocessing services in both train and inference use the same libraries to avoid preprocessing skew.
+    Video Table Index and Video / Text encoders must be versioned to avoid version mismatch skew
 
 Latency estimation:
     - Network ~ 100 ms
     - Text preprocess - 10 ms
-    - Text encoder (5-10 words - 15 tokens * 100M params = 1.5 * 10^9 FLOP / (3.12 * 10^14) * 0.1(MFU) ~
-        15 * 10^9 / 3 * 10^14 = 3 * 10^-5) = 30 us
+    - Text encoder (batch = 1, one short query of ~15 tokens): compute is negligible
+        (2 * 100M * 15 = 3 * 10^9 FLOP), but at batch 1 we are memory bandwidth bound, not compute
+        bound: all weights are read from HBM to do very little math:
+        100M params * 2 bytes = 200 MB / ~2 TB/s ~ 0.1 ms
+        Real cost is dominated by tokenization, kernel launch overhead and RPC ~ 5 ms
     - Search in Video Index Table (1B elements) - 40 ms (in parallel with ElasticSearch)
     - ElasticSearch (1B elements) - 40 ms (in parallel with Search in Video Index Table)
-    - Merge and rerankingof two candidate lists (~ 0)
+    - Merge and reranking of two candidate lists (~ 0)
     - Reranking using cross-encoder (MiniLM-L6: 6 layers * 384 hidden -> ~10.6M non-embedding params,
         embedding table is a lookup and costs no FLOP, so it is not counted):
         FLOP = 2 * 10.6 * 10^6 * (100 candidates * 256 tokens) = 5.4 * 10^11
         t = 5.4 * 10^11 / (3.12 * 10^14 * 0.1 (MFU)) = 1.7 * 10^-2 ~ 17 ms
+        MFU = 0.1 is taken as PESSIMISTIC bound here on purpose: latency budget is written for p99,
+        when batch is not full, cache is cold and GPU is shared. Expected MFU for full batch of 100
+        sequences is ~0.4 (see Compute estimation), which gives ~4 ms - that value is used for
+        capacity planning, but it would be wrong to plan p99 latency by average-case number
     - Reranking with LambdaRank (~ 0)
     - Response - 10 ms
-    Total: 177 ms
+    Total: 182 ms (p99 budget is 500 ms, so ~320 ms is left as headroom on purpose:
+        retries, GC pauses, cold caches and stragglers of ANN shards eat it in bad cases)
 
 Memory estimation:
     - Video Index Table: 10^9 * 256 * 2 ~ 500 GB RAM (need very big server or sharding)
@@ -172,15 +215,17 @@ Compute estimation (GPU fleet):
     - Text encoder: batch = 1, so it is memory bandwidth bound, not compute bound:
         100M params * 2 bytes = 200 MB / ~2 TB/s ~ 0.1 ms -> ~1-5 GPU for whole fleet, negligible
     - Cross-encoder: 5.4 * 10^11 FLOP per query (see Latency estimation).
-        Here batch = 100 sequences, so MFU is much better than 0.1: take 0.4
+        Here we take EXPECTED MFU = 0.4 (full batch of 100 sequences), not the pessimistic 0.1
+        from Latency estimation: fleet size is defined by average throughput, not by p99 of one query
         t_gpu = 5.4 * 10^11 / (3.12 * 10^14 * 0.4) = 4.3 ms of pure GPU time per query
-        10^4 QPS * 4.3 ms = 43 GPU-seconds per second -> 43 GPU at 100% util,
-        ~70 GPU at safe 60% util, ~150-200 GPU if we size for peak (x2-3 of average RPS)
-        With pessimistic MFU = 0.1 it would be ~300-600 GPU
+        Fleet is sized for peak RPS from NFT (30000 RPS, peak factor is already included there):
+        3 * 10^4 QPS * 4.3 ms = 129 GPU-seconds per second -> ~130 GPU at 100% util,
+        ~215 GPU at safe 60% util (above ~70% util queueing delay grows non-linearly)
+        With pessimistic MFU = 0.1 it would be ~500-900 GPU
     - Cache of head queries (results are the same for all users, no personalization)
-        with ~50% hit rate cuts this fleet in half
+        with ~50% hit rate cuts this fleet in half -> ~110 GPU
     - This is why top-100 was chosen instead of top-500 for cross-encoder: cost is linear
-        in number of candidates, 500 candidates ~ 350-1000 GPU (millions of $ per year)
+        in number of candidates, 500 candidates ~ 1000+ GPU (millions of $ per year)
 
     Offline (indexing):
     - Video encoder: ViT-B/16 ~ 17.6 GFLOP per frame * 16 frames ~ 2.8 * 10^11 FLOP per video
