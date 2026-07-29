@@ -28,12 +28,14 @@ Data:
         - tags
         - short description
         - age restriction
+        - language (of audio/transcript, from ASR language detection)
         - duration
         - likes/dislikes
         - views
         - comments
     - text request:
         - timestamp
+        - language (detected from query text + user's interface locale)
 
     - pair text request - link to video
 
@@ -65,17 +67,18 @@ Model:
         - video embeddings (sequence of frame images, use ViT)
         - text embeddings of video's audio transcript (computed once when uploaded): 
             audio track -> ASR (e.g. Whisper) -> Long Context BERT -> embedding
-        - video name (BERT, multilang)
-        - tags (TF-IDF, BM-25, model may depend on language)
-        - description (BERT, multilang)
+        - video name + description (BERT, multilang)
+        - tags (BERT)
     Embeddings from two towers -> cosine simililarity between embeddings -> Contrastive Loss
 
     rerank filtered embedding using small cross-encoder BERT-like network (e.g. MiniLM):
     - query (user's request) and documents (video features) are in one sequence and attention has
         access to all necessary information -> that helps to increase model's performance
 
-    final reranking model (LambdaRank) that uses cross-encoder score, populariry, freshness, engagement, etc. for
-    final model rerank 
+    final reranking model (LambdaRank) that uses cross-encoder score, populariry, freshness, engagement,
+    language match (request language vs video language), etc. for final model rerank
+    Language is a soft feature here, NOT a hard filter: multilang encoders match cross-lingual pairs,
+    and user may want content in other language (music, tutorials), so we only boost same-language videos
 
 
 Offline metrics:
@@ -101,6 +104,14 @@ Train:
     Some videos can be viewed/liked/commented etc. too often so we also add sample weight for each video:
     the more it's popular, the less probability of it's sampling to train batch.
 
+    Clicks are biased not only by popularity but also by position, so for every impression we log
+    propensity p - probability that this video was shown at this position by current policy:
+        query_id, video_id, position, p, policy_version, was_explored, click, watch_time
+    Position bias curve for p is estimated from randomized exploration traffic (see Inference).
+    Then each train example is weighted by 1/p (IPW), with clipping to control variance.
+    Logged propensities also allow off-policy evaluation: estimate online CTR of a new ranker
+    offline (IPS/doubly robust) before spending A/B traffic on it.
+
 Inference:
     - Pre-calculate embeddings for each new uploaded video using video encoder from bi-encoder model
     - Pre-calculate tags for each new uploaded video using Tag Service
@@ -108,6 +119,8 @@ Inference:
     - Each user's text request is transformed to embedding by encoder from bi-encoder model and key words are also extracted from it
     - Find candidates for user request in video index table by search for nearest neighbours for text embedding using ANN/HNSW/PQ/etc.
     - Find candidates for user request in video index table by using key words and ElasticSearch
+        (per-language analyzers: tokenization, stemming and stopwords depend on language,
+        so request language defines which analyzer/index is used)
     - Both searches are filtered by age restriction (and region/deleted/private status) INSIDE the search,
         not after it: post-filtering of top-K can return almost empty list if filter is selective.
         ANN needs filtered search support (e.g. filtered HNSW), ElasticSearch does it with filter clause.
@@ -116,7 +129,18 @@ Inference:
     - Merge two ranked lists of candidates, merge their ranks too, then sort by merged rank, select top 100
     - Top 100 candidates are sent to cross-encoder
     - Final reranking with LambdaRank
-    - 
+    - Randomized exploration (on small part of traffic, to collect unbiased train data):
+        - ~1% of queries: swap random adjacent pairs in final list -> unbiased estimation of
+            position bias curve (how much CTR drops from rank 1 to rank 10 only because of position)
+        - ~1-5% of queries: replace 1-2 slots by candidates from deeper part of retrieval list
+            (ranks 100-1000). Explore at positions 6-10, not at position 1 -> we get impression
+            and click signal for much smaller UX cost
+        - new videos get guaranteed quota of impressions in first days, otherwise their engagement
+            features for LambdaRank stay empty forever (cold start)
+        - exploration works only on already filtered pool (never explore into age restricted,
+            region blocked, spam content) and is turned off for navigational head queries,
+            where random result is too visible
+        - cost of exploration is measured as separate A/B arm (CTR/watch time delta vs control)
     - Search result is returned to user
 
 
@@ -131,12 +155,37 @@ Latency estimation:
     - Reranking using cross-encoder (MiniLM-L6: 6 layers * 384 hidden -> ~10.6M non-embedding params,
         embedding table is a lookup and costs no FLOP, so it is not counted):
         FLOP = 2 * 10.6 * 10^6 * (100 candidates * 256 tokens) = 5.4 * 10^11
-        t = 5.4 * 10^11 / (3.12 * 10^14 * 0.1 (MFU)) = 1.7 * 10^-2) ~ 17 ms
+        t = 5.4 * 10^11 / (3.12 * 10^14 * 0.1 (MFU)) = 1.7 * 10^-2 ~ 17 ms
     - Response - 10 ms
     Total: 177 ms
 
 Memory estimation:
     - Video Index Table: 10^9 * 256 * 2 ~ 500 GB RAM (need very big server or sharding)
+
+Compute estimation (GPU fleet):
+    Online (per query, A100 ~ 3.12 * 10^14 FLOP/s fp16):
+    - Text encoder: batch = 1, so it is memory bandwidth bound, not compute bound:
+        100M params * 2 bytes = 200 MB / ~2 TB/s ~ 0.1 ms -> ~1-5 GPU for whole fleet, negligible
+    - Cross-encoder: 5.4 * 10^11 FLOP per query (see Latency estimation).
+        Here batch = 100 sequences, so MFU is much better than 0.1: take 0.4
+        t_gpu = 5.4 * 10^11 / (3.12 * 10^14 * 0.4) = 4.3 ms of pure GPU time per query
+        10^4 QPS * 4.3 ms = 43 GPU-seconds per second -> 43 GPU at 100% util,
+        ~70 GPU at safe 60% util, ~150-200 GPU if we size for peak (x2-3 of average RPS)
+        With pessimistic MFU = 0.1 it would be ~300-600 GPU
+    - Cache of head queries (results are the same for all users, no personalization)
+        with ~50% hit rate cuts this fleet in half
+    - This is why top-100 was chosen instead of top-500 for cross-encoder: cost is linear
+        in number of candidates, 500 candidates ~ 350-1000 GPU (millions of $ per year)
+
+    Offline (indexing):
+    - Video encoder: ViT-B/16 ~ 17.6 GFLOP per frame * 16 frames ~ 2.8 * 10^11 FLOP per video
+        1B videos: 2.8 * 10^20 / (3.12 * 10^14 * 0.4) ~ 2.2 * 10^6 s ~ 600-1000 GPU-hours
+        -> cheap, few hours on 100-200 GPU. Can be repeated on each retrain of bi-encoder
+    - ASR: 1B videos * ~10 min ~ 1.7 * 10^8 hours of audio, Whisper ~ 50-100x realtime
+        -> ~10^6 GPU-hours for initial backfill of existing corpus (expensive, one time, months)
+        Steady state: ~500 upload-hours per minute -> ~300 GPU running continuously
+        IMPORTANT: ASR result (transcript) is cached per video and NEVER recomputed on retrain,
+        only cheap text encoder pass over cached transcript is redone
 
 
 TODO:
