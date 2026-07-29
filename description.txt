@@ -6,7 +6,7 @@ Business task:
 FT:
     - return videos (and only videos) that are the most relevant to user's search text
     - same search result - same output, no user personalization
-    - multiple supported languages for simplicity
+    - multiple supported languages
 
 NFT:
     - 1 billion videos
@@ -40,7 +40,7 @@ Data:
     - pair text request - link to video
 
     
-    CLIP-like: build confusion matrix of N x N where rows correspond to N text requests
+    CLIP-like: build similarity (logit) matrix of N x N where rows correspond to N text requests
     and columns - to N videos. Pairs on matrix diagonal are positives and marked by 1, the rest 
     are 0. So it's some sort of multiclass classification with N classes.
 
@@ -87,6 +87,9 @@ Offline metrics:
     - in case when only one video from search response can be relevant, we use MRR
     - Recall@100
 
+    Golden dataset must be stratified by types of queries (head - most popular queries/torso - informational, 
+        moderately specific/tail - long, rare entities, misspellings) and languages
+
 Online metrics:
     - Long-click CTR = (number of long clicks) / impressions
         long click = watch_time >= max(30 sec, 0.3 * duration)
@@ -125,10 +128,13 @@ Train:
             2 - click without long watch
             3 - long click (watch_time >= max(30 sec, 0.3 * duration))
             4 - long click + explicit positive action (like, comment, subscribe, repost)
-        Use NDCG metric
+        Graded labels are required by the objective itself: LambdaRank gradients are weighted by
+        delta NDCG of swapping two documents, and NDCG is defined on graded gains.
 
     Also both model are updated during system work - system collects users requests and actions 
     (like, comment, subscribe, repost) and builds makes additional labeled data based on that information.
+    Hard negatives for Bi-encoder can be obtained online from Video Index Table results. Among
+    them hard negatives are results that were clicked less than others or didn't clicked at all.
     Some videos can be viewed/liked/commented etc. too often so we also add sample weight for each video:
     the more it's popular, the less probability of it's sampling to train batch.
 
@@ -163,7 +169,10 @@ Inference:
         Age restriction is compared with viewer's account age/settings - this is the only place where
         request depends on user, ranking itself stays non-personalized
     - Merge two ranked lists of candidates, fuse their ranks (score = Σ 1/(k + rank_i), k≈60), 
-        then sort by fused rank, select top 100
+        then sort by fused rank, select top 200
+    - For each candidate in a list measure similarity between this candidate and next M (e.g. 10) candidates
+        and if some of these candidates are close to the current - throw them out. Continue until process all
+        candidates or lenght of candidate list > 100. Thus we get rid of overly similar videos in query results.
     - Top 100 candidates are sent to cross-encoder
     - Final reranking with LambdaRank
     - Randomized exploration (on small part of traffic, to collect unbiased train data):
@@ -182,6 +191,14 @@ Inference:
 
     Text preprocessing services in both train and inference use the same libraries to avoid preprocessing skew.
     Video Table Index and Video / Text encoders must be versioned to avoid version mismatch skew
+    Depending on query type (head/torso/tail) one or another branch works better:
+        - Video Embeddings Index (dense) - works better for head/torso: queries are verbose and
+            semantic, embeddings generalize over synonyms and paraphrases
+        - ElasticSearch (lexical) - works better for tail: rare proper nouns, product codes, exact
+            entity names. Dense embedding blurs a rare token into its semantic neighbourhood and
+            loses it, while BM25 matches the exact term
+        - LambdaRank interaction features (popularity, engagement) are dense for head and empty
+            for tail, so on tail the final ranking relies mostly on cross-encoder relevance
 
 Latency estimation:
     - Network ~ 100 ms
@@ -208,7 +225,14 @@ Latency estimation:
         retries, GC pauses, cold caches and stragglers of ANN shards eat it in bad cases)
 
 Memory estimation:
-    - Video Index Table: 10^9 * 256 * 2 ~ 500 GB RAM (need very big server or sharding)
+    - Video Index Table (raw fp16 vectors): 10^9 * 256 * 2 ~ 500 GB RAM
+    - PQ compression: split 256-dim vector into 64 sub-vectors, 1 byte code each -> 64 bytes per video
+        10^9 * 64 ~ 64 GB -> fits into 1-2 machines instead of a rack, at the cost of some recall
+        (approximate distances). Exact re-scoring of top candidates by full vectors compensates it
+    - Sharding: even 64 GB + HNSW graph is sharded by video_id into ~8-16 shards for throughput
+        and availability; router does scatter-gather and merges top-K from all shards.
+    - ElasticSearch index: 1B videos with transcripts (~10 KB of text each) ~ 10 TB of raw text,
+        inverted index is of the same order -> tens of nodes, this is much bigger than vector index
 
 Compute estimation (GPU fleet):
     Online (per query, A100 ~ 3.12 * 10^14 FLOP/s fp16):
@@ -239,12 +263,12 @@ Compute estimation (GPU fleet):
 
 
 TODO:
+- A/B tests
+- Monitoring
+- Fallback
 - Use an ML model to find titles and tags that are semantically similar to text queries. This model can be combined with Elasticsearch
     to improve search quality.
 - An important aspect of search systems is query understanding: the system corrects spelling, identifies the query category and recognizes entities.
     How to build a component that would analyze the meaning of a query?
 - Videos that are too similar in the search results can degrade the user experience. How to detect overly similar videos
     in order to remove them before displaying the results?
-- Text queries can be divided into head, torso and tail. What approaches are usually applied to each
-    of these types?
-- How do real-world video search systems work?
