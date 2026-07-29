@@ -27,52 +27,46 @@ Data:
         - timestamp
         - tags
         - short description
-        - country
-        - language
-        - location
-        - age restriction
         - duration
         - likes/dislikes
         - views
         - comments
     - text request:
         - timestamp
-        - language 
-        - location
-        - country
 
     - pair text request - link to video
 
-    First approach:
-    We can create positive pairs using request-video pair and the negative ones using negative sampling.
-    Ratio between positive and negative samples should be 1:1, but we can create much more negative samples
-    (e.g. 100 millions vs 10 million of positive pairs) and on each train epoch subsample from them 10 million ->
-    better diversity and generalization. Binary classification.
-
-    Second approach:
-    CLIP like: build confusion matrix of N x N where rows correspond to N text requests
+    
+    CLIP-like: build confusion matrix of N x N where rows correspond to N text requests
     and columns - to N videos. Pairs on matrix diagonal are positives and marked by 1, the rest 
     are 0. So it's some sort of multiclass classification with N classes.
 
 Loss function:
-    First approach: logloss/BCE
-    Second approach: for each positive text-video pair on confusion matrix diagonal we calculate CE_rows + CE_columns, 
-    where CE_rows is Cross Entropy between text request and N videos from matrix, and CE_columns - vice versa, 
-    CE between current video and N text requests. Then we average this loss for N pairs in matrix.
+    Contrastive Loss: -log((exp(sim(i, j))/temp) / (sum(exp(sim(i, k))/temp))), k != i
+    i, j - positive pair, all other pairs are negative ones
+    Loss is calculated for current video and all text request and for current text request and
+    all video -> final loss is the sum of these two
 
 Model:
-    two-tower neural network:
+    learn embeddings using two-tower neural network (bi-encoder):
     - first tower accepts:
         - text request (BERT, multilang)
-        - country (embedding)
-        - location (coordinates or name of exact location, numeric or embedding)
     - second accept:
         - video embeddings (sequence of frame images, use ViT)
+        - text embeddings of video's audio transcript (computed once when uploaded): 
+            audio track -> ASR (e.g. Whisper) -> Long Context BERT -> embedding
+        - video name (BERT, multilang)
         - tags (TF-IDF, BM-25, model may depend on language)
-        - short description (BERT, multilang)
-        - country (embedding)
-        - location (coordinates or name of exact location, numeric or embedding)
-    Embeddings from two towers -> cosine simililarity between embeddings -> scale to 0-1 -> loss
+        - description (BERT, multilang)
+    Embeddings from two towers -> cosine simililarity between embeddings -> Contrastive Loss
+
+    rerank filtered embedding using small cross-encoder BERT-like network (e.g. MiniLM):
+    - query (user's request) and documents (video features) are in one sequence and attention has
+        access to all necessary information -> that helps to increase model's performance
+
+    final reranking model (LambdaRank) that uses cross-encoder score, populariry, freshness, engagement, etc. for
+    final model rerank 
+
 
 Offline metrics:
     - in case when multiple videos can be relevant to user's request, we can create golden dataset 
@@ -84,27 +78,52 @@ Online metrics:
     - average number of minutes of video watched by users for the last day/week/month
     - like/watch ratio, comment/watch ratio, subscribe/watch ratio 
 
+Train:
+    - first train bi-encoder
+    - then train cross-encoder on hardest pairs that bi-encoder struggles to solve
+    - then distill trained cross-encoder into bi-encoder using soft labels
+    - repeat until it stops to improve (usually 2-3 rounds)
+    - cross-encoder can be additionally distilled from bigger LLMs (offline teacher)
+
+    Also both model are updated during system work - system collects users requests and actions 
+    (like, comment, subscribe, repost) and builds makes additional labeled data based on that information.
+    Some videos can be viewed/liked/commented etc. too often so we also add sample weight for each video:
+    the more it's popular, the less probability of it's sampling to train batch.
+
 Inference:
-    - Pre-calculate embeddings for each new uploaded video using model's video encoder
+    - Pre-calculate embeddings for each new uploaded video using video encoder from bi-encoder model
     - Pre-calculate tags for each new uploaded video using Tag Service
     - Store both in video index table
-    - Each user's text request is transformed to embedding by model's text encoder and also key words extracted from it
+    - Each user's text request is transformed to embedding by encoder from bi-encoder model and key words are also extracted from it
     - Find candidates for user request in video index table by search for nearest neighbours for text embedding using ANN/HNSW/PQ/etc.
     - Find candidates for user request in video index table by using key words and ElasticSearch
-    - The result (e.g. hundreds of embeddings) is sent to Rerank service where two candidate lists are merged and
-        reranked by their cosine simililarity with text embedding
-    - Sorted by descending ranks video links are returned to user
+    - Merge two lists of candidates, rank them by score, select top 100
+    - Top 100 candidates are sent to cross-encoder for final reranking
+    - Search result is returned to user
+
+
+Latency estimation:
+    - Network ~ 100 ms
+    - Text preprocess - 10 ms
+    - Text encoder (5-10 words - 15 tokens * 100M params = 1.5 * 10^9 FLOP / (3.12 * 10^14) * 0.1(MFU) ~
+        15 * 10^9 / 3 * 10^14 = 3 * 10^-5) = 30 us
+    - Search in Video Index Table (1B elements) - 40 ms (in parallel with ElasticSearch)
+    - ElasticSearch (1B elements) - 40 ms (in parallel with Search in Video Index Table)
+    - Merge of two candidate lists (~ 0)
+    - Reranking using cross-encoder (500 candidates * 256 tokens * 20M params ~ 2.56^12 FLOP / (3.12 * 10^14) * 0.1(MFU) ~ 
+        2.5 * 10^13 / 3.12 * 10^14 ~ 1.5 * 10^-2) ~ 15 ms
+    - Response - 10 ms
+    Total: 175 ms
+
+Memory estimation:
+    - Video Index Table: 10^9 * 256 * 2 ~ 500 GB RAM (need very big server or sharding)
 
 
 TODO:
-- Instead of relying on already labeled data, data can be constructed and labeled based on interactions (clicks, likes, etc.).
-    This enables continuous training of the model.
 - Use an ML model to find titles and tags that are semantically similar to text queries. This model can be combined with Elasticsearch
     to improve search quality.
 - An important aspect of search systems is query understanding: the system corrects spelling, identifies the query category and recognizes entities.
     How to build a component that would analyze the meaning of a query?
-- How to build a multimodal system that processes speech and audio to improve search results?
-- How to add support for other languages to this task?
 - Videos that are too similar in the search results can degrade the user experience. How to detect overly similar videos
     in order to remove them before displaying the results?
 - Text queries can be divided into head, torso and tail. What approaches are usually applied to each
