@@ -133,8 +133,15 @@ Train:
 
     Also both model are updated during system work - system collects users requests and actions 
     (like, comment, subscribe, repost) and builds makes additional labeled data based on that information.
-    Hard negatives for Bi-encoder can be obtained online from Video Index Table results. Among
-    them hard negatives are results that were clicked less than others or didn't clicked at all.
+    Hard negatives for bi-encoder are mined from ANN top-k (e.g. k=500) of the current bi-encoder.
+    Rank 500 out of 10^9 means the model put it in the top 0.00005% of the corpus — that's a high score, but
+    500th video in result wasn't shown to almost anyone -> video with relatively high score which is negative ->
+    hard negative. Then mined candidates are scored by cross-encoder teacher and the ones it rates as relevant are
+    dropped - they are false negatives. Negatives are re-mined on every distillation round, 
+    because "hard" is defined by current model.
+    Batch size N is the number of negatives per positive, so quality of contrastive training grows
+    with N -> use large batches (gradient caching if it doesn't fit into memory).
+    
     Some videos can be viewed/liked/commented etc. too often so we also add sample weight for each video:
     the more it's popular, the less probability of it's sampling to train batch.
 
@@ -170,11 +177,13 @@ Inference:
         request depends on user, ranking itself stays non-personalized
     - Merge two ranked lists of candidates, fuse their ranks (score = Σ 1/(k + rank_i), k≈60), 
         then sort by fused rank, select top 200
-    - For each candidate in a list measure similarity between this candidate and next M (e.g. 10) candidates
-        and if some of these candidates are close to the current - throw them out. Continue until process all
-        candidates or lenght of candidate list > 100. Thus we get rid of overly similar videos in query results.
+    - Near-duplicate removal (re-uploads, mirrors, same video with another intro): compare candidates
+        by perceptual/content hash of frames. Go through list from top and drop a candidate if it is a
+        duplicate of any already kept one, until 100 candidates are left or all candidates are processed.
     - Top 100 candidates are sent to cross-encoder
     - Final reranking with LambdaRank
+    - Topical diversification (MMR) on the final ranked list:
+        score = lambda * relevance_score - (1 - lambda) * max_similarity(candidate, already selected)
     - Randomized exploration (on small part of traffic, to collect unbiased train data):
         - ~1% of queries: swap random adjacent pairs in final list -> unbiased estimation of
             position bias curve (how much CTR drops from rank 1 to rank 10 only because of position)
@@ -266,9 +275,8 @@ TODO:
 - A/B tests
 - Monitoring
 - Fallback
+- Golden Set pooling
 - Use an ML model to find titles and tags that are semantically similar to text queries. This model can be combined with Elasticsearch
     to improve search quality.
 - An important aspect of search systems is query understanding: the system corrects spelling, identifies the query category and recognizes entities.
     How to build a component that would analyze the meaning of a query?
-- Videos that are too similar in the search results can degrade the user experience. How to detect overly similar videos
-    in order to remove them before displaying the results?
