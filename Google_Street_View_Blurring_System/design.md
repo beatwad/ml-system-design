@@ -1,0 +1,86 @@
+# Blurring System for Google Street View
+
+## Business task
+
+Protect the personal data + minimize the cost of manual labor for car plate blurring.
+
+## Functional requirements (FT)
+
+- Blur human faces and car plates on GSV
+- Process any types of car plates
+- Tackle with biased racial distribution of human faces
+- User can complain about the face/car plate which was not blurred
+- Some pictures can randomly be sent to operator for manual verification of blur correctness
+
+## Non-functional requirements (NFT)
+
+- How many photos in total? 100M
+- How many new photos per day? Suppose that million per day → RPS ~ 10 → load on system is low
+- Is system latency critical? Don't think so, users can use previous photos until new photos are processed, not latency critical for the blur-production pipeline; the map-lookup/serving path is out of scope for this design
+
+## ML task
+
+- **Semantic segmentation** (because we need to detect and mask exactly car plate or exactly human face and don't touch any other objects nearby which can decrease informativity of photo + if e.g. multiple faces are close to each other — we don't need to separate them from each other, just blur them together)
+- Do we have labeled dataset for this task? 1 million of labeled photos
+
+## Data
+
+- Photo
+- Dataset: (object type (face, plate), photo URL, array of masked pixel coordinates)
+- Metadata: timestamp, coordinates, camera orientation (X, Y, Z angles)
+
+Need to tackle with limited diversity of dataset: split the original dataset into clusters by skin color and use stratified sampling while training.
+
+## Model
+
+- Preprocess pipeline (resize + convert to universal color scheme (RGB/CMYK))
+- Data augmentation (crop, scale, mirror, change colors/brightness/contrast, cutmix, noise)
+- Semantic segmentation architecture (U-Net, FCN, DeepLab)
+
+## Loss function
+
+Dice loss + BCE loss.
+
+Dice computes a ratio of overlap mask and real object to total mass of both — it is robust to class imbalance. But Dice is unstable when GT mask is very small or empty (that's why epsilon is added) or saturates when overlap is roughly correct. That's why Dice is combined with BCE.
+
+```
+Dice = (2 * sum(p_i * g_i) + epsilon) / (sum(p_i^2) + sum(g_i^2) + epsilon)
+
+Dice loss  = 1 - Dice
+BCE loss   = - sum(g_i * log(p_i) + (1 - g_i) * log(1 - p_i))
+Total loss = alpha * Dice loss + beta * BCE loss
+```
+
+- `p_i` — model prediction for i-th pixel
+- `g_i` — 1 if i-th pixel belongs to class, 0 otherwise
+- `epsilon` ~ 1e-8
+
+## Offline metrics
+
+- IOU (intersection over union)
+- mAP (mean Average Precision)
+- Prepare golden dataset for evaluation of face blurring for different races and lighting conditions
+- Threshold for TP/FP should be biased toward higher recall (because FP blur is a small inconvenience but FN blur is a personal data exposure) → threshold should be lower
+
+## Online metrics
+
+- (Number of user complaints about not blurred human faces / car plates for the last day/week/month) / (Total number of users for the last day/week/month)
+- (Amount of manual blurrings for the last day/week/month) / (Total amount of processed photos for the last day/week/month)
+
+## Inference
+
+- Train dataset keeps increasing:
+    - Audit service randomly grabs images (the probability can be adjusted by model confidence — the lower model confidence is, the higher probability)
+    - Audit service asks operator to check images (whether predicted masks are correct)
+    - User complains about not blurred human faces / car plates
+    - Operator fixes them and adds new images with correct masks to train dataset
+- Rollout model with 1% of data → collect metrics → gradually increase percentage
+- Retrain model when at least 10% of new data are added or performance (measured by Offline and Online metrics) of new model degrades comparing to previous model
+
+## General Data Protection Regulation (GDPR)
+
+- Some images need to be stored unblurred (for model retraining), but only for internal purpose
+- Most original images have TTL (e.g. 30-90 days) because of audit purpose
+- In case of complaint from user — TTL for original image can be frozen until complaint is resolved
+- Very few roles have access to unblurred images, every access must be logged
+- Users have right to request their personal data (including any unblurred images) to be deleted: they just need to select image on which they (presumably) appear and send request, their data will be indexed by geolocation and if they appear in any nearby street view images they all will be deleted too
