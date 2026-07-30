@@ -71,11 +71,11 @@ Learn embeddings using two-tower neural network (bi-encoder):
     - text embeddings of video's audio transcript (computed once when uploaded): audio track → ASR (e.g. Whisper) → Long Context BERT → embedding
     - video name + description (BERT, multilang)
     - tags (BERT)
+- Embeddings from two towers → cosine similarity between embeddings → Contrastive Loss.
 
-Embeddings from two towers → cosine similarity between embeddings → Contrastive Loss.
+Small ML model (doc2query, e.g. fine-tuned mT5) trained on (video text → paired query) to generate plausible queries for a video from its name/description/transcript, and add them to video metadata (field "predicted_queries"), indexed as a separate lower-weighted ElasticSearch field. This closes vocabulary mismatch between document terms and real user queries (e.g. transcript says "48 megapixel sensor", query says "best low light phone camera") — a lexical retrieval problem. Place this model into Query Generation Service, as part of Video Index Pipeline.
 
-Rerank filtered embedding using small cross-encoder BERT-like network (e.g. MiniLM):
-
+Small cross-encoder BERT-like network (e.g. MiniLM) that reranks filtered embedding:
 - Query (user's request) and documents (video features) are in one sequence and attention has access to all necessary information → that helps to increase model's performance
 
 Final reranking model (LambdaRank) that uses cross-encoder score, popularity, freshness, engagement, language match (request language vs video language), etc. for final model rerank.
@@ -133,12 +133,12 @@ Metrics are reported per stratum (head/torso/tail, language), not only aggregate
 - Long-running holdback (~1% of users on frozen model for a quarter) to catch slow effects that no 2-week A/B can see: popularity feedback loop, cold start of new videos
 
 ## Train
-
 - First train bi-encoder
 - Then train cross-encoder on hardest pairs that bi-encoder struggles to solve
 - Then distill trained cross-encoder into bi-encoder using soft labels
 - Repeat until it stops to improve (usually 2-3 rounds)
 - Cross-encoder can be additionally distilled from bigger LLMs (offline teacher)
+- doc2query model: train it on video names/tags/transcriptions and corresponding queries, this model may be additionally finetuned from time to time when new videos appear
 - Train LambdaRank on cross-encoder score + video interaction features (popularity, freshness, engagement, etc.), video interaction features should be computed at impression timestamp to avoid train/inference skew → video interaction features should be logged
 
     Label is **NOT** a raw click (raw CTR is gameable by clickbait), but graded relevance built from satisfaction signals of the same impression:
@@ -180,7 +180,9 @@ Position bias curve for `p` is estimated from randomized exploration traffic (se
 
 ### Serving pipeline (online, per user query)
 
+- Make spell correction using Trie/Reversed Tree of similar model
 - Pre-process user's query (stemming, lemmatization), add filters
+- Classify intent of query - e.g. navigational queries benefit more from lexical branch -> during RRF lexical ranks should have more weight, informational queries benefit more from dense branch ->  dense ranks should have more weight.
 - Ask Cache if the result is in it, if cache hit — return the result and don't go further
 - Each user's text request is transformed to embedding by encoder from bi-encoder model and key words are also extracted from it
 - Find candidates for user request in video index table by search for nearest neighbours for text embedding using ANN/HNSW/PQ/etc.
@@ -192,7 +194,7 @@ Position bias curve for `p` is estimated from randomized exploration traffic (se
     score = Σ_lists w_l / (k + rank_i), k ≈ 60
     ```
 
-    Ranks are used instead of scores because cosine (0..1) and BM25 (unbounded, corpus dependent) are not comparable and both drift when index changes. `k` flattens the top, so appearing in **BOTH** lists is worth more than being rank 1 in one of them. Weights `w_l` depend on query type: dense branch is up-weighted for head/torso, lexical one for tail (see notes about head/torso/tail below), then sort by fused rank, select top 200
+    Ranks are used instead of scores because cosine (0..1) and BM25 (unbounded, corpus dependent) are not comparable and both drift when index changes. `k` flattens the top, so appearing in **BOTH** lists is worth more than being rank 1 in one of them. Weights `w_l` depend on query type (dense branch is up-weighted for head/torso, lexical one for tail (see notes about head/torso/tail below)), and also on query intent (dense and lexical branches works differently for queries with different intentions). Then sort by fused rank, select top 200
 - Near-duplicate removal (re-uploads, mirrors, same video with another intro): compare candidates by perceptual/content hash of frames. Go through list from top and drop a candidate if it is a duplicate of any already kept one, until 100 candidates are left or all candidates are processed
 - Top 100 candidates are sent to cross-encoder
 - Final reranking with LambdaRank
@@ -328,8 +330,3 @@ Main principle: every stage has its own deadline and a **DEFINED** degraded outp
 - Retries only once, with jitter: retry storm under overload makes things worse
 - Encoder/index version mismatch → block deploy and roll back to previous consistent pair
 - "Degraded mode rate" is itself a monitored metric with an alert
-
-## TODO
-
-- Use an ML model to find titles and tags that are semantically similar to text queries. This model can be combined with ElasticSearch to improve search quality.
-- An important aspect of search systems is query understanding: the system corrects spelling, identifies the query category and recognizes entities. How to build a component that would analyze the meaning of a query?
