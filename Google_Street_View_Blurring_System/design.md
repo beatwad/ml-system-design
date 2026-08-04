@@ -77,6 +77,30 @@ Total loss = alpha * Dice loss + beta * BCE loss
 - Rollout model with 1% of data → collect metrics → gradually increase percentage
 - Retrain model when at least 10% of new data are added or performance (measured by Offline and Online metrics) of new model degrades comparing to previous model
 
+## A/B tests
+
+- Randomization unit: **image**, not user — output isn't personalized, every viewer sees the same blur, so there's no cross-request correlation to worry about like in a ranking system
+- Still assign by capture batch/geographic tile rather than pure per-image random: photos from the same drive are correlated (same lighting, camera, plate/face style), so naive per-image randomization can accidentally concentrate one region's edge cases into a single arm
+- Organic complaints are too rare and too slow to reach significance on their own (long-tail event, reported days/weeks after exposure) — the audit service's forced random sampling is the actual fast-turnaround readout, not the passive complaint stream
+- Shadow mode before any real exposure: run the candidate model on live incoming photos in parallel, log where its predicted masks disagree with the current model's, route disagreements to an operator for adjudication — estimates the real precision/recall delta with **zero risk**, since the candidate's output is never published
+- Rollout ladder, each step gated on the previous. Unlike a typical UX A/B this is not reversible once a photo ships unblurred, so start far more conservative:
+    1. Offline: IOU/mAP on golden dataset
+    2. Shadow mode on live traffic (no publish)
+    3. Canary: 1% of newly captured photos, elevated audit-sampling rate on that 1% to get a fast read on FN/FP instead of waiting on complaints
+    4. Ramp 1% → 10% → 50% → 100%, guardrails re-checked at each step, automatic rollback if breached
+- Guardrails: manual-blurring rate must not increase (model pushing more images into human fallback), predicted-blur-area distribution must not shift heavily (a collapse to "blur everything" trivially wins recall while destroying informativity — the FN-biased threshold already accepts some over-blur, but a distribution shift flags a degenerate model)
+- Long-running holdback: small % of traffic kept on the previous model indefinitely, to catch slow drift a 2-4 week A/B window can't see — new car models, new plate formats/fonts, seasonal clothing changes affecting face detection
+
+## Monitoring
+
+- Model behavior (no ground truth needed, real-time): predicted-blur-area per photo and detections-per-photo, tracked as a distribution — a drop toward zero across a slice is the dangerous case, since it produces no errors, just silently unblurred photos
+- Per-slice coverage, not just aggregate: blur rate broken out by region/camera hardware/capture batch — an aggregate blur rate can look perfectly normal while one region or one new camera model silently gets near-zero detections (e.g. a feed integration bug skips preprocessing for that source), and it would take a while for complaints from that specific region to surface it
+- Input drift: new camera hardware (different color profile/resolution), new geographic rollout (unfamiliar plate formats), seasonal lighting shift — same class of preprocessing-skew risk as any vision pipeline
+- Pipeline/infra: capture-to-blur processing lag (queue backlog), preprocessing error/reject rate (corrupted or unsupported images), GPU utilization of the segmentation fleet
+- Quality proxy with ground truth: audit-service agreement rate between model prediction and operator correction — same signal used for the retrain trigger, so it should be dashboarded and alerted on, not just checked at retrain time
+- Business/compliance (see also GDPR section above): user complaint rate and manual-blurring rate trends — a spike here is an **incident**, not a metric to note on a dashboard, since by the time it's visible the underlying privacy exposure already shipped to production
+- Deployed model version vs. version used to build the current golden/audit baseline must match — same hard-alert requirement as any versioned model, a silent mismatch invalidates every metric above it
+
 ## General Data Protection Regulation (GDPR)
 
 - Some images need to be stored unblurred (for model retraining), but only for internal purpose
@@ -84,3 +108,4 @@ Total loss = alpha * Dice loss + beta * BCE loss
 - In case of complaint from user — TTL for original image can be frozen until complaint is resolved
 - Very few roles have access to unblurred images, every access must be logged
 - Users have right to request their personal data (including any unblurred images) to be deleted: they just need to select image on which they (presumably) appear and send request, their data will be indexed by geolocation and if they appear in any nearby street view images they all will be deleted too
+
