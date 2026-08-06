@@ -152,7 +152,7 @@ This is why RAG evaluation needs several separate metrics instead of one end-to-
 - Connectors pull from Confluence/Slack/Google Drive (webhook where available, periodic sync otherwise), detect create/update/delete
 - Extract text (strip HTML/markdown, OCR (Optical Character Recognition) for scanned PDFs/images)
 - Chunk (semantic, ~300 tokens, 15% overlap, heading-aware)
-- Embed each chunk with the bi-encoder, store in vector index + lexical index, with ACL resolved from the parent doc
+- Embed each chunk with the bi-encoder, store in Vector Index + BM index, with ACL resolved from the parent doc
 - Permission-only change → cheap metadata update, no re-embedding
 - Doc deleted → tombstone/remove its chunks
 - Index freshness lag (source edit timestamp → searchable timestamp) is tracked as an SLA (Service-Level Agreement), target ~15 min
@@ -171,6 +171,8 @@ This is why RAG evaluation needs several separate metrics instead of one end-to-
 10. Map citation markers in the output back to chunk source metadata (title, url, snippet)
 11. Async, non-blocking: sample the exchange into the groundedness/eval pipeline
 12. Log feedback affordances (thumbs, citation clicks) for the training flywheel
+
+Use Document Update Service and Chunk Encoder to load new document from Outer Sources, split them by chunks, encode them and add to Vector Index
 
 ### Notes
 
@@ -230,7 +232,7 @@ Unlike a search system, the meaningful p99 isn't one number — it's split into 
     ```
 
 - **Time-to-first-token ≈ 5+5+20+9+5+450 ≈ 494 ms** (budget is 1.5 s p99 → comfortable headroom)
-- LLM decode (streamed, doesn't block perceived latency but bounds full-answer time): memory-bandwidth bound — reading 70B params (140 GB fp16) across 8 GPUs' aggregate ~16 TB/s HBM (High Bandwidth Memory, the GPU's on-chip memory) bandwidth per token:
+- LLM decode (streamed, doesn't block perceived latency but bounds full-answer time): memory-bandwidth bound — reading 70B params (70 GB fp8) across 8 GPUs' aggregate ~16 TB/s HBM (High Bandwidth Memory, the GPU's on-chip memory) bandwidth per token:
 
     ```
     t/token = 140 GB / 16 TB/s ~ 8.75 ms/token
@@ -243,7 +245,7 @@ Unlike a search system, the meaningful p99 isn't one number — it's split into 
 
 - Vector index: 20M chunks * 768-dim * 2 bytes (fp16) = ~31 GB raw. PQ-compressed (PQ = Product Quantization; 96 sub-vectors, 1 byte each) → 20M * 96 bytes ≈ 1.9 GB — fits comfortably on a single machine
 - Lexical index: 20M chunks * ~1.2 KB text ≈ 24 GB raw text, inverted index of similar order — a handful of nodes is enough at this corpus size
-- LLM weights: 70B params * 2 bytes (fp16) = 140 GB, sharded across 8 A100s (80 GB each) for tensor parallelism, plus KV-cache (Key-Value cache, the per-token attention state the model keeps around during decoding) memory that scales with concurrent requests * context length
+- LLM weights: 70 B params, 1 byte/param -> 70 GB + KV-cache (40 layers * 5000 tokens * 8 KV heads * 128 head dim = 2*10^5 * 10^3 = 2\*10^8) ~ 71 GB, 8 A100s have 640 GB RAM - acceptable
 
 ## Compute estimation (GPU fleet)
 
