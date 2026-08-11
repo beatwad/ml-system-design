@@ -67,15 +67,20 @@ Total loss = alpha * Dice loss + beta * BCE loss
 - (Number of user complaints about not blurred human faces / car plates for the last day/week/month) / (Total number of users for the last day/week/month)
 - (Amount of manual blurrings for the last day/week/month) / (Total amount of processed photos for the last day/week/month)
 
+## Train
+
+- Initial training on the 1M-image labeled dataset, stratified by skin-color cluster (see Data) to counter racial bias in face detection
+- Flywheel — training set keeps growing after launch:
+    - Audit service randomly grabs images for operator review, sampling probability adjusted by model confidence — the lower the confidence, the higher the probability
+    - User complaints flag not-blurred faces/plates
+    - Operator fixes the predicted masks; corrected images are added to the training set
+- Retrain trigger: at least 10% new labeled data accumulated, or Offline/Online metrics degrade compared to the currently deployed model
+
 ## Inference
 
-- Train dataset keeps increasing:
-    - Audit service randomly grabs images (the probability can be adjusted by model confidence — the lower model confidence is, the higher probability)
-    - Audit service asks operator to check images (whether predicted masks are correct)
-    - User complains about not blurred human faces / car plates
-    - Operator fixes them and adds new images with correct masks to train dataset
-- Rollout model with 1% of data → collect metrics → gradually increase percentage
-- Retrain model when at least 10% of new data are added or performance (measured by Offline and Online metrics) of new model degrades comparing to previous model
+- Pipeline per photo: capture → preprocess (resize, normalize color scheme) → segmentation model → predicted masks → blur applied to masked regions → store blurred photo (unblurred original retained separately, subject to GDPR TTL)
+- Offline/batch, not latency-critical (per NFT): ~10 RPS average, processed asynchronously — users see the previous photo until the new one finishes processing
+- Low-confidence predictions are routed to the audit service for operator review, feeding the Train flywheel above
 
 ## A/B tests
 

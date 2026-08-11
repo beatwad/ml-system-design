@@ -37,27 +37,6 @@ Two chained ML tasks over a private, permission-gated, constantly-changing corpu
     - real: clicked citation in a thumbs-up answer = positive; chunk retrieved but not clicked/not cited = candidate negative
 - Golden eval set: SME-curated (question, correct chunk_ids, reference answer), stratified by department/domain, refreshed regularly since correct answers can go stale as docs change
 
-## Loss function
-
-Retriever is a bi-encoder trained with a symmetric InfoNCE contrastive loss:
-
-- `q_i`, `c_i` — L2-normalized embeddings of query i and chunk i in a batch of size N
-- `sim(q, c)` = cosine similarity = dot product of normalized embeddings
-- `temp` — learnable temperature (init ~0.07), kept in log-scale and clamped
-
-```
-query -> chunk: L_q2c(i) = -log( exp(sim(q_i, c_i)/temp) / sum_k exp(sim(q_i, c_k)/temp) )
-chunk -> query: L_c2q(i) = -log( exp(sim(c_i, q_i)/temp) / sum_k exp(sim(c_i, q_k)/temp) )
-
-L = 1/(2N) * sum_i (L_q2c(i) + L_c2q(i))
-```
-
-`i, i` is the positive pair, all other pairs in the batch are negatives. The sum in the denominator runs over all `k = 1..N` (positive included), otherwise it isn't a valid softmax over the batch.
-
-Reranker (cross-encoder) is trained pointwise with binary cross-entropy on labeled (query, chunk, relevant?) pairs, or listwise if graded relevance labels are available.
-
-The generator LLM itself is **not trained from scratch** and usually isn't trained at all — it's a pretrained instruction-tuned model used purely via prompting (in-context learning). Optional light SFT (Supervised Fine-Tuning; cross-entropy next-token loss on curated (context, question, cited answer) triples), or LoRA fine-tuning, only to fix citation formatting/tone — never to inject factual knowledge, since that's what retrieval is for.
-
 ## Model
 
 ### Why RAG (Retrieval-Augmented Generation) instead of just an LLM, or a fine-tuned LLM
@@ -119,6 +98,27 @@ A wrong or unhelpful answer can come from four different places, and they need d
 4. **Citation failure** — the answer is correct and grounded, but points to the wrong (or no) source
 
 This is why RAG evaluation needs several separate metrics instead of one end-to-end score — Recall@k catches (1)/(2), faithfulness/groundedness catches (3), citation accuracy catches (4).
+
+## Loss function
+
+Retriever is a bi-encoder trained with a symmetric InfoNCE contrastive loss:
+
+- `q_i`, `c_i` — L2-normalized embeddings of query i and chunk i in a batch of size N
+- `sim(q, c)` = cosine similarity = dot product of normalized embeddings
+- `temp` — learnable temperature (init ~0.07), kept in log-scale and clamped
+
+```
+query -> chunk: L_q2c(i) = -log( exp(sim(q_i, c_i)/temp) / sum_k exp(sim(q_i, c_k)/temp) )
+chunk -> query: L_c2q(i) = -log( exp(sim(c_i, q_i)/temp) / sum_k exp(sim(c_i, q_k)/temp) )
+
+L = 1/(2N) * sum_i (L_q2c(i) + L_c2q(i))
+```
+
+`i, i` is the positive pair, all other pairs in the batch are negatives. The sum in the denominator runs over all `k = 1..N` (positive included), otherwise it isn't a valid softmax over the batch.
+
+Reranker (cross-encoder) is trained pointwise with binary cross-entropy on labeled (query, chunk, relevant?) pairs, or listwise if graded relevance labels are available.
+
+The generator LLM itself is **not trained from scratch** and usually isn't trained at all — it's a pretrained instruction-tuned model used purely via prompting (in-context learning). Optional light SFT (Supervised Fine-Tuning; cross-entropy next-token loss on curated (context, question, cited answer) triples), or LoRA fine-tuning, only to fix citation formatting/tone — never to inject factual knowledge, since that's what retrieval is for.
 
 ## Offline metrics
 

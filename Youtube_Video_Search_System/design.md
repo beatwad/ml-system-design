@@ -42,24 +42,6 @@ System must accept text request and return the list of the most relevant video, 
 
 **CLIP-like:** build similarity (logit) matrix of `N x N` where rows correspond to N text requests and columns — to N videos. Pairs on matrix diagonal are positives and marked by 1, the rest are 0. So it's some sort of multiclass classification with N classes.
 
-## Loss function
-
-Contrastive Loss (InfoNCE), symmetric:
-
-- `t_i`, `v_i` — L2-normalized embeddings of text request i and video i in batch of size N
-- `sim(t, v)` = cosine similarity = dot product of normalized embeddings
-- `temp` — learnable temperature (init ~0.07), kept in log-scale and clamped
-
-```
-text -> video: L_t2v(i) = -log( exp(sim(t_i, v_i)/temp) / sum_k exp(sim(t_i, v_k)/temp) )
-video -> text: L_v2t(i) = -log( exp(sim(v_i, t_i)/temp) / sum_k exp(sim(v_k, t_i)/temp) )
-
-L = 1/(2N) * sum_i (L_t2v(i) + L_v2t(i))
-```
-
-`i, i` — positive pair, all other pairs in batch are negative ones.
-Sum in denominator runs over all `k = 1..N` (positive included), otherwise it is not a valid softmax over the batch.
-
 ## Model
 
 Learn embeddings using two-tower neural network (bi-encoder):
@@ -81,6 +63,24 @@ Small cross-encoder BERT-like network (e.g. MiniLM) that reranks filtered embedd
 Final reranking model (LambdaRank) that uses cross-encoder score, popularity, freshness, engagement, language match (request language vs video language), etc. for final model rerank.
 
 Language is a soft feature here, **NOT** a hard filter: multilang encoders match cross-lingual pairs, and user may want content in other language (music, tutorials), so we only boost same-language videos.
+
+## Loss function
+
+Contrastive Loss (InfoNCE), symmetric:
+
+- `t_i`, `v_i` — L2-normalized embeddings of text request i and video i in batch of size N
+- `sim(t, v)` = cosine similarity = dot product of normalized embeddings
+- `temp` — learnable temperature (init ~0.07), kept in log-scale and clamped
+
+```
+text -> video: L_t2v(i) = -log( exp(sim(t_i, v_i)/temp) / sum_k exp(sim(t_i, v_k)/temp) )
+video -> text: L_v2t(i) = -log( exp(sim(v_i, t_i)/temp) / sum_k exp(sim(v_k, t_i)/temp) )
+
+L = 1/(2N) * sum_i (L_t2v(i) + L_v2t(i))
+```
+
+`i, i` — positive pair, all other pairs in batch are negative ones.
+Sum in denominator runs over all `k = 1..N` (positive included), otherwise it is not a valid softmax over the batch.
 
 ## Offline metrics
 
