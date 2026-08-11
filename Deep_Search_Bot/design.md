@@ -55,7 +55,7 @@ An agentic pipeline chaining several ML tasks in a loop:
 
 ### Planner
 
-An LLM call produces an initial ordered sub-question list, each optionally tagged with a suggested source. The plan is revised as evidence comes in — sub-question 1 (e.g., "which service had the most incidents") is often a prerequisite for phrasing sub-question 2 correctly, so decomposition isn't fixed upfront.
+An LLM call produces an initial ordered sub-question list, each optionally tagged with a suggested source. Previous sub-question is often a prerequisite for phrasing the next sub-question correctly, so decomposition isn't fixed upfront.
 
 ### Tool router and tools
 
@@ -110,6 +110,7 @@ Most components are a **pretrained instruction-tuned LLM used via prompting/func
 - Train per-source bi-encoders/rerankers with InfoNCE + hard-negative mining, one pass per source (query patterns differ: Slack is short/informal, Confluence is long/formal)
 - Fine-tune Text-to-SQL per database/dialect on curated + synthetic triples; re-run on material schema changes
 - Planner/router/reflection/synthesizer stay prompt-only initially; job-trace logs (thumbs-down + escalations, human-reviewed) feed an optional later SFT/DPO pass to cut wasted iterations, not to change correctness
+- bi-encoders/rerankers can later be additionally trained on the answer results (e.g. log query, retrieved objects with scores, reranker score for each object, user rating, escalation flag - if answer has objects with low retrieve/rerank score but high user mark - it's hard positive and vice versa)
 
 ## Inference
 
@@ -142,7 +143,6 @@ Every tool call is logged with exact input/output — this makes the job trace d
 - Ladder, cheap → expensive:
     1. Offline: per-source Recall@k, Text-to-SQL execution accuracy, decomposition coverage, iteration efficiency
     2. Online, small traffic slice: primary metric = thumbs-up rate, guardrails = escalation rate, partial-report rate, cost per query, sampled human-reviewed hallucination rate
-    3. Ramp up with guardrails checked at each step; cost per query watched closely, since a planner/prompt change can silently increase average iterations
 - Report per team/question-type — a regression isolated to one tool (e.g., Text-to-SQL) is easy to miss in an aggregate number
 
 ## Monitoring
