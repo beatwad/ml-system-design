@@ -89,30 +89,26 @@ Two approaches:
 Fine-tune the threshold based on offline metric
 
 ## Train
-Train/val/split based on user_id, optimize MSE loss for auto-encoder, optimize BCE for transformer
+Train/val/split based on user_id and bot campaings (bots from the same bot campaing must belong to either train or val datasets), optimize BCE.
 
-How to define that user is bot? He/she was blocked for bot-like behaviour and didn't appeal his/her blocking during some time (e.g. one month) or appelation was failed (e.g. failed to KYC) and no additional attempts were made in one month.
+How to define that user is bot? He/she was blocked for bot-like behaviour and didn't appeal his/her blocking during some time (e.g. one month) or appelation was failed (e.g. failed to KYC) and no additional attempts were made in one month. This bot accounts must be additionally verified by CME to prevent false positives.
 
 ## Inference
-1st scenario:
-    - Scheduler service finds new users and users who were active during last 3 days and wasn't checked for bot-like behaviour in last 10 days
-    - It collects user data and put them into Queue
-    - Then user data exit the Queue and is sent to the model
-    - Model returns the score:
-        - If it's high - user is blocked automatically (can appeal this later)
-        - If it's high but not enough - report to a human operator - let him/her decide
-2nd scenario:
-    - Someone complains on user account for bot-like behaviour (e.g. multiple times during the last 24 hours)
-    - Complain service collects user data and put them in a separate Queue to ensure that this complain will be considered immediately
-    - Next is the same as in previous scenario
+- Detection Service detect the suspicious user behaviour
+- It collects user data and put them into Queue
+- Then model takes the user data from the Queue
+- Model returns the score:
+    - If it's high - user is blocked automatically (can appeal this later)
+    - If it's high but not enough - report to a human operator - let him/her decide
 
 ## A/B tests + montoring
 At first check offline metrics
-Then try the model on 1% of users, measure:
+Then try the model on 1-5% of users, measure:
     - Avg time that user spends in application
     - User activity
     - Number of bought subscriptions
-Control number of complains and appeals and churn rate: if something of that is growing rapidly - stop the experiment and find out why this happened.
+
+Control number of complains, appeals and churn rate: if something of that is growing rapidly - stop the experiment and find out why this happened.
 If all okay - increase the number of users
 
 ## Fallback
