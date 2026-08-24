@@ -5,7 +5,7 @@ Detect bot behaviour and block them to prevent their interaction with users. The
 
 ## FT
 - detect bot-like behaviour 
-- the detection trigger is a suspicious behaviour - a lot of complains on user, connection from the unusual location (e.g. different country), using VPN and proxies, a lot of actions for some period of time, mass DMs, job applies or connection requests etc.
+- the detection trigger is a suspicious behaviour - a lot of complains on user or a lot of complains FROM user and users with whom the account is connected or shares same IPs/subnets, connection from the unusual location (e.g. different country), using VPN and proxies, a lot of actions for some period of time, mass DMs, job applies or connection requests etc.
 - in case of high confidence block the corresponding account automatically
 - in case of mid confidence inform the Operator about a potentially bot-like behaviour
 
@@ -73,7 +73,7 @@ Number of paid subscription
 - graph features (connection graph + interaction graph "who liked/commented/DM-ed whom"):
     - in/out degree, ratio of sent connection requests to accepted ones
     - local clustering coefficient, number of connected components in the neighbourhood (bots connect to random unrelated users -> low coefficient)
-    - share of neighbours that are blocked or belong to the same linked cluster
+    - share of neighbours that are blocked (at the time when suspicious behaviour was detected) or belong to the same linked cluster
     - PageRank / k-core position - real accounts are embedded in dense professional communities, farm accounts sit on the periphery
     - coordination features: number of other accounts that act on the same targets/posts within a small time window, similarity of activity time distribution to other accounts of the cluster
     - node2vec/GraphSAGE embedding of the user as a dense feature
@@ -82,24 +82,33 @@ Data example: user features + blocking history + last 50-100 activities + list o
 
 ## Model
 Two approaches:
-- Baseline: GBTD, then can switch to BERT-like transformer, which is good for sequence processing.
-- Graph part: start with hand-crafted linkage/graph aggregates as features for GBTD (cheap, recomputed in batch), then can switch to GNN (Graph Neural Network, e.g. GraphSAGE) over the connection/interaction graph and feed its embedding into the main model.
+- Baseline: GBDT, then can switch to BERT-like transformer, which is good for sequence processing.
+- Graph part: start with hand-crafted linkage/graph aggregates as features for GBDT (cheap, recomputed in batch), then can switch to GNN (Graph Neural Network, e.g. GraphSAGE) over the connection/interaction graph and feed its embedding into the main model.
 - Cluster-level decision: score the linked account cluster as a whole, not only the single account - if a large share of the cluster is confidently bot-like, raise the score of the remaining accounts (a single account is easy to disguise, a farm of 10k is not).
 
 Fine-tune the threshold based on offline metric
 
 ## Train
-Train/val/split based on user_id and bot campaings (bots from the same bot campaing must belong to either train or val datasets), optimize BCE.
+Train/val/split based on time, stratify by bot campaings (bots from the same bot campaing must belong to either train or val/test datasets), optimize BCE.
 
-How to define that user is bot? He/she was blocked for bot-like behaviour and didn't appeal his/her blocking during some time (e.g. one month) or appelation was failed (e.g. failed to KYC) and no additional attempts were made in one month. This bot accounts must be additionally verified by CME to prevent false positives.
+How to define that user is bot? He/she was blocked for bot-like behaviour and didn't appeal his/her blocking during some time (e.g. one month) or appelation was failed (e.g. failed to KYC) and no additional attempts were made in one month. This bot accounts must be additionally verified by SMEs to prevent false positives.
+
+Additionally add users that were blocked but they are not the bots, and bots that behave like humans (hard negatives and hard positives).
 
 ## Inference
-- Detection Service detect the suspicious user behaviour
+- Detection Service detects the suspicious user behaviour
 - It collects user data and put them into Queue
 - Then model takes the user data from the Queue
 - Model returns the score:
     - If it's high - user is blocked automatically (can appeal this later)
     - If it's high but not enough - report to a human operator - let him/her decide
+The auto-block threshold must be tight: <1k/day FPs.
+
+Additionally can add service that checks every account (Sweep Detector Service) just by scanning the User database looking for users that weren't checked for some time.
+
+How to stop mass complains:
+- cap the max complains number (e.g. no more than 10 per hour)
+- mass complains is a suspicious behaviour too 
 
 ## A/B tests + montoring
 At first check offline metrics
