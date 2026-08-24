@@ -69,7 +69,35 @@ Documents are split into chunks before indexing, because: the LLM context window
 
 ### Reranker
 
-Cross-encoder (query + chunk in one sequence, a MiniLM-class model) reranks the fused top ~50 candidates down to the top 5–10 chunks that actually get sent to the LLM. This step matters *more* here than in plain search: irrelevant chunks in the LLM's context don't just lower a ranking metric, they directly cause hallucination or a distracted/wrong answer ("lost in the middle" effect), so precision at very small k is the priority.
+Cross-encoder (query + chunk in one sequence, a MiniLM-class model) reranks the fused top ~50 candidates down to a top ~20 shortlist (post-ranking below cuts that to the 5–10 chunks that actually get sent to the LLM). This step matters *more* here than in plain search: irrelevant chunks in the LLM's context don't just lower a ranking metric, they directly cause hallucination or a distracted/wrong answer ("lost in the middle" effect), so precision at very small k is the priority.
+
+### Post-ranking (business-signal re-scoring after the cross-encoder)
+
+The cross-encoder scores *topical relevance only*. It cannot tell a current policy page from its 2019 archived copy, or an official HR document from a Slack guess by an intern that happens to use the same words — both look equally relevant to the query. But whatever chunk wins here is what the LLM will assert, with a citation, as company truth. So the reranked top ~20 goes through one more cheap re-scoring pass before the final 5-10 chunks are cut.
+
+Signals:
+
+- **Freshness** — exponential decay on the doc's last-substantive-update timestamp, with a **per-source-type half-life** rather than one global constant: a 3-year-old vacation policy is fine, a 3-year-old deploy runbook is dangerous
+- **Authority / source prior** — official Confluence space or approved policy doc > ticket comment > ad-hoc Slack message. Plus per-doc signals: SME-verified/endorsed flag, view count, number of internal inbound links (PageRank-ish "everyone links to this page")
+- **Lifecycle flags** — `archived` / `deprecated` / `superseded_by` metadata → hard demotion or outright exclusion, not a soft penalty. Cheapest signal to maintain and the highest-value one, because a superseded doc is not "slightly less relevant", it's actively wrong
+- **Diversity / dedup** — near-duplicates (the same policy copy-pasted into three spaces, or two overlapping adjacent chunks) burn the tiny context budget and give the LLM false corroboration of a single source. MMR-style (Maximal Marginal Relevance) selection plus a cap of ~2-3 chunks per parent doc, so one long document can't occupy every slot
+
+Combination — start with a hand-tuned, relevance-dominant blend over normalized signals:
+
+```
+final = s_ce_norm + w_f * freshness + w_a * authority - w_d * dup_penalty
+```
+
+`s_ce_norm` is the sigmoid/min-max-normalized cross-encoder score, and the business weights are deliberately kept small: they should reorder near-ties (two chunks that both answer the question — prefer the fresh, authoritative one) but must never promote an off-topic chunk above a clearly relevant one. Once enough citation-click/thumbs data exists, replace the hand-tuned weights with a small **LTR (Learning to Rank)** model — GBDT (Gradient Boosted Decision Trees)/LambdaMART over `[cross-encoder score, RRF score, BM25 score, freshness, authority, historical citation-CTR of the chunk]`. The feature set is small and interpretable, so this stays ~1 ms for 20 candidates and stays debuggable.
+
+The final ordering also decides prompt slot order, not just membership: the strongest chunk goes at the start or the end of the context block, never buried in the middle ("lost in the middle").
+
+Caveats:
+
+- **Freshness must be query-dependent** — "what *was* our 2023 travel policy" is a legitimate historical question; the recency boost is suppressed when query understanding detects an explicit time reference
+- **Timestamp hygiene** — bulk migrations or format cleanups touch `updated_at` on every doc at once and make the whole corpus look fresh. Track a content-hash-based last-substantive-change instead of the connector's raw mtime
+- **The confidence gate stays on the raw cross-encoder score**, not on the post-ranked score — a chunk boosted for being fresh and authoritative is not evidence that the question is answerable at all
+- **Popularity/CTR features are a feedback loop** — a chunk that gets cited gets boosted, gets cited more. Cap their weight and monitor the concentration of citations over a small set of docs
 
 ### Query understanding
 
@@ -164,13 +192,14 @@ The generator LLM itself is **not trained from scratch** and usually isn't train
 3. Embed query + extract keywords
 4. Hybrid retrieval: ANN dense + BM25 lexical, both ACL-filtered inside the search
 5. RRF-fuse → top ~50 candidates
-6. Cross-encoder rerank → top 5–10 chunks
-7. Confidence gate: below threshold → return "not found" fallback, skip the LLM call entirely
-8. Assemble prompt (system instructions + chunks with source tags + condensed question + recent turns)
-9. Call LLM, stream tokens back to the user
-10. Map citation markers in the output back to chunk source metadata (title, url, snippet)
-11. Async, non-blocking: sample the exchange into the groundedness/eval pipeline
-12. Log feedback affordances (thumbs, citation clicks) for the training flywheel
+6. Cross-encoder rerank → top ~20 chunks
+7. Post-rank: blend in freshness/authority/lifecycle signals, drop near-duplicates and cap chunks per parent doc → final top 5–10
+8. Confidence gate (on the raw cross-encoder score): below threshold → return "not found" fallback, skip the LLM call entirely
+9. Assemble prompt (system instructions + chunks with source tags, strongest chunk first/last + condensed question + recent turns)
+10. Call LLM, stream tokens back to the user
+11. Map citation markers in the output back to chunk source metadata (title, url, snippet)
+12. Async, non-blocking: sample the exchange into the groundedness/eval pipeline
+13. Log feedback affordances (thumbs, citation clicks) for the training flywheel
 
 Use Document Update Service and Chunk Encoder to load new document from Outer Sources, split them by chunks, encode them and add to Vector Index
 
@@ -193,6 +222,7 @@ Embedding model version and vector index version must be tracked together — a 
 
 - Retrieval quality proxies: ANN recall vs. brute force, share of results contributed by each branch (dense vs. lexical) — RRF can mask a dead branch, since the fused list still looks full while half the recall is silently gone
 - Index freshness lag (doc edit → searchable)
+- Age and authority distribution of *cited* docs — share of answers citing a doc older than N months or flagged archived/deprecated; drift here means the post-ranking weights (or the lifecycle metadata feeding them) have gone stale
 - Groundedness/faithfulness score sampled over time, alert on spike (generation-side regression, e.g. after an LLM/prompt version change)
 - "I don't know" rate — too high signals index/coverage gaps, too low may mean the confidence gate is too permissive and the model is guessing instead of declining
 - Citation click-through and thumbs-down rate, broken out per team/department — surfaces systematic content gaps for specific domains
@@ -223,6 +253,7 @@ Unlike a search system, the meaningful p99 isn't one number — it's split into 
     t = 2.7*10^11 / (3.12*10^14 * 0.1 MFU) ~ 9 ms
     ```
 
+- Post-ranking (metadata feature lookup + blend/dedup over 20 candidates, no neural net) — ~1 ms
 - Prompt assembly — 5 ms
 - LLM prefill (time-to-first-token contribution): self-hosted 70B model, ~3,250 prompt tokens (system + 8 chunks*300 tok + history), tensor-parallel across 8 A100s:
 
@@ -231,7 +262,7 @@ Unlike a search system, the meaningful p99 isn't one number — it's split into 
     t = 4.55*10^14 / (8 * 3.12*10^14 * 0.4 MFU) ~ 450 ms
     ```
 
-- **Time-to-first-token ≈ 5+5+20+9+5+450 ≈ 494 ms** (budget is 1.5 s p99 → comfortable headroom)
+- **Time-to-first-token ≈ 5+5+20+9+1+5+450 ≈ 495 ms** (budget is 1.5 s p99 → comfortable headroom)
 - LLM decode (streamed, doesn't block perceived latency but bounds full-answer time): memory-bandwidth bound — reading 70B params (70 GB fp8) across 8 GPUs' aggregate ~16 TB/s HBM (High Bandwidth Memory, the GPU's on-chip memory) bandwidth per token:
 
     ```
@@ -239,7 +270,7 @@ Unlike a search system, the meaningful p99 isn't one number — it's split into 
     300-token answer: 300 * 8.75 ms ~ 2.6 s
     ```
 
-- **Time-to-full-answer ≈ 494 ms + 2.6 s ≈ 3.1 s** (budget is 8 s p99 → headroom for queueing, cold cache, multi-turn condensation add-on)
+- **Time-to-full-answer ≈ 495 ms + 2.6 s ≈ 3.1 s** (budget is 8 s p99 → headroom for queueing, cold cache, multi-turn condensation add-on)
 
 ## Memory estimation
 
