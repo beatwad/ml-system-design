@@ -38,6 +38,8 @@ The goal is not to play "gotcha" interviewer. The goal is to help the user build
 
 6. **If the user revises their design after feedback and re-shares it**, don't repeat the full checklist review — focus on whether the specific points you raised were addressed, and whether the fix introduced any new issues.
 
+7. **If asked to add the text to design file**, be concise, add only information which is absolutely necessary.
+
 ## Notes on handling images
 
 If the scheme is a photo/screenshot, look closely for: direction of arrows (data flow vs dependency), which components are offline (batch/training) vs online (serving), any latency/SLA numbers written on the diagram, and any labels that indicate feedback loops (logging, retraining triggers). These details are often where the interesting gaps are (e.g. missing feedback loop from production back into training data, or a training/serving skew risk in feature computation).
