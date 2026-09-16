@@ -17,19 +17,17 @@ We lose $10k for each missed anomaly. Avg anomaly rate is 10 anomalies per month
 - 1000 shops
 - 10k different items
 - 5k invoices per hour
-- minimize number of false alarams
+- minimize number of false alarams (not more than 5 per day)
 - mimimize time of anomaly detection
 - maximize number of detected anomalies
 
 ## ML task
 
-Anomaly detection. We predict sales of pair item-shop or item for all shops for the next week/day/hour and if expected << observed - it's anomaly.
+Anomaly detection. We predict sales of pair item-shop or item for all shops for the next week/day/hour and if observed << expected  - it's anomaly.
 
 ## Offline metrics
 
-Use quantile regression with q <= 0.01, i.e. penalize model for a huge overprediction.
-
-For each item / item group we set the treshold and if difference between predicted target and observed target is bigger than this threshold - it's anomaly.
+For each item / item group we set the treshold and if difference between predicted target and observed target is bigger than this threshold - it's anomaly. More details about threshold in Model section.
 
 Offline metrics:
 - Recall (need to catch as many anomalies as possible)
@@ -46,21 +44,24 @@ Offline metrics:
 
 ## Data
 
-We have 2 years of data -> ~100M invoices. Can group them by total sales per shop/shops per hour/day/week/month. 
+We have 2 years of data -> ~60M invoices. Can group them by total sales per shop/shops per hour/day/week/month. Also take into account that not every item is being sold in every shop, so the total number of item-shop pairs << shop_num * item_num
 
 - shop id
 - item id
-- timestamp
+- timestamp + time features (season, weekday, holidays, etc)
 - quantity
-- price
+- price and price change
+- promo, sales, price offs, etc.
 - shop coords
 - previous sales (min/max/avg sales hour/day/week/month ago)
 - sales of that item in N closest shops
 - sales of similar items in that shop (maybe in closest shops)
 - don't have customer info
-- can get additional data, e.g. weather forcast for this place and time
-- out of stock flag (to filter the situation when sales suddenly fall because of out of stock situation)
-- target must be normalized to avoid price difference: `|current - previous| / previous` or `|current - previous| / ((current + previous) / 2)`
+- additional data, e.g. weather forcast for this place and time
+- out of stock flag (to filter the situation when sales suddenly fall because of out of stock situation) - we don't consider OOS as anomaly and won't use our model to detect it
+- shop is not working flag (working hours, renovation, permamently closed)
+- item was delisted from shop's product range
+- target: item-shop sales for the last hour/day/week/month (it depends on item and shop)
 
 Need to have a feature storage which updates every hour/6 hours/day and then prediction model is run.
 
@@ -68,25 +69,36 @@ Need to have a feature storage which updates every hour/6 hours/day and then pre
 
 We want to minimize time of anomaly detection - need relatively simple model:
 - Linear Regression
-- SVM Regressor
 - RandomForest Regressor
 - Gradient Boosting
 
-Model is run for ~10M item-shop pairs and 10k items for all shops -> ~10M objects as frequently as possible, let it be 1 hour. All of these models above are light weight enough, 10M predictions/hour is okay for them. Problem mostly in feature preparation.
+We use GBDT with Poisson or Tweedie objective to predict the number of sales for every item-shop pair, because these objectives use a log link, so the prediction is always positive and multiplicative effects like seasonality and promos come naturally.
+
+We have 5000 invoices per hour, so fo some item-shop pairs we can predict rarely. Suppose we must predict for 100k pairs per hour. GBDTs like LightGBM or CatBoost are lightweight enough, 100K predictions/hour is okay for them and features will be prepared fast enough too.
+
+After we predict the sales next hour/day/week/etc., we use this prediction as lambda in e.g. Poisson distribution and predict the probability to get the same or less sales that we observe (i.e. cumulative probability of the left tail of distribution). And if it's less than a threshold (alpha) for that item or item-shop pair - we send an alert. alpha must be derived from false alert budget (not more than 5 false alerts per day -> not more than 1 false alert per 3 hours).
 
 ## Train
 
-Prepare features and target, use TSS.
+Prepare features and target, use TSS. Use SMEs to show which of sales drops are anomalies and which are not. 
 
-How many item-shop pairs if we predict daily for 2 years? 80B - quite huge.
+Also consider adding of syntetic sales falls cause their historical number is ~240 and this is a very small value for 60M rows dataset - this will help us to make Offline metrics not so noisy.
 
-How many total invoices? 60M -> the majority of items are sold rarely -> except different threshold we should also predict more frequently for some items and less frequently for others. This should be determined during train.
+The majority of items are sold rarely -> except different threshold we should also predict more frequently for some items and less frequently for others. This should be determined during train.
+
+Features, that contain anomaly sale behaviour, must be excluded from the train dataset - model must not treat them as kind of normal behaviour. E.g. we can replace them with mean of previous and next sales (if both of them ok).
 
 ## Inference
 
 Use something like cron job, for each item category we fire with some period (1 hour, 2 hours, 8 hours, daily, weekly, etc., controled by Scheduler), prepare features, send them to model, make prediction, compare with item-specific threshold, notify Analysts if necessary.
 
-Also have Monitoring Service which detects feature/target/concept drift and retrains the model + Data Collection Service to collect information from Analysts about anomalies that were not detected and add them to train data. Thresholds and periods for each item/group of items can be set by Setting Service.
+Also have Monitoring Service which detects feature/target/concept drift and send notifications to ML Engineers in that case. 
+
+Also periodically (e.g. once a week) retrain the model. Use Data Collection Service to collect information from Analysts about anomalies that were not detected and add them to train data. 
+
+Thresholds and periods for each item/group of items can be set by Setting Service.
+
+Even when model will be put production, analytics should conduct random manual anomaly checks from time to time for sales that model considers as not anomal.
 
 ## Monitoring
 
@@ -96,7 +108,7 @@ Also have Monitoring Service which detects feature/target/concept drift and retr
 
 ## AB-test
 
-Run the model in parallel with analysts for e.g. a month.
+Run the model in parallel with analysts for e.g. a month + add a synthetic anomalies to increase the amount of data (10 anomalies per month is not enough for reliable test).
 
 Primary metrics:
 - recall, must not be significantly worth than analysts recall
@@ -122,8 +134,8 @@ If number of false notifications or missed anomalies rise dramatically (e.g. +10
 
 ## Compute
 
-Models are light, compute of features can take time. Suppose it's 20M of pairs item-shop per 24 hours, each pair has 10kB of features to genearate -> 200 GB of data to process every 24 hours. Prepare 2*10^7 pairs / 10^5 secs is 200 pairs per second. Doesn't look computationally intensive. 
+Models are light, compute of features can take time. Suppose it's 100k of pairs item-shop every hour, each pair has 1kB of features to genearate -> 100 MB of data to process every hour. Even weak hardware can handle it.
 
-## Latency
+## Compute and Latency
 
-Model takes microseconds. Million of rows for one GBDT per 1 CPU core is ~30 secs, multiple CPU cores decrease this time to seconds. Feature preparation will take tens of seconds -> the latency of whole system is less than a minute even on weak hardware.
+ Model takes microseconds. Million of rows for one GBDT per 1 CPU core is ~30 secs, 100k -> 3 secs, multiple CPU cores decrease this time to less than a second. Feature preparation will take tens of seconds for million obects -> couple of seconds for 100k -> the latency of the whole system is less than a 10-20 secs even on weak hardware.
