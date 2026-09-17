@@ -27,7 +27,7 @@ Anomaly detection. We predict sales of pair item-shop or item for all shops for 
 
 ## Offline metrics
 
-For each item / item group we set the treshold and if difference between predicted target and observed target is bigger than this threshold - it's anomaly. More details about threshold in Model section.
+For each item / item group we set the threshold (alpha) and if probabiltiy of item sales is smaller than this threshold - it's anomaly. More details about threshold in Model section.
 
 Offline metrics:
 - Recall (need to catch as many anomalies as possible)
@@ -84,21 +84,23 @@ Prepare features and target, use TSS. Use SMEs to show which of sales drops are 
 
 Also consider adding of syntetic sales falls cause their historical number is ~240 and this is a very small value for 60M rows dataset - this will help us to make Offline metrics not so noisy.
 
-The majority of items are sold rarely -> except different threshold we should also predict more frequently for some items and less frequently for others. This should be determined during train.
+The majority of items are sold rarely -> except different threshold we should also predict more frequently for some items and less frequently for others. Check frequency should be computed for each item-shop pair, if some items are sold rarely, we can discard that pairs and watch at the gloabl sales of these items.
 
 Features, that contain anomaly sale behaviour, must be excluded from the train dataset - model must not treat them as kind of normal behaviour. E.g. we can replace them with mean of previous and next sales (if both of them ok).
 
 ## Inference
 
-Use something like cron job, for each item category we fire with some period (1 hour, 2 hours, 8 hours, daily, weekly, etc., controled by Scheduler), prepare features, send them to model, make prediction, compare with item-specific threshold, notify Analysts if necessary.
+Use something like cron job, for each item category we fire with some period (1 hour, 2 hours, 8 hours, daily, weekly, etc., controled by Scheduler), prepare features, send them to model, make prediction, compare with item-specific threshold, notify Analysts if necessary. We also must detect the situation when data from some shop are stalled and don't make model to make predictions for that shop. All of this is done 
 
-Also have Monitoring Service which detects feature/target/concept drift and send notifications to ML Engineers in that case. 
+Also have Monitoring Service which detects feature/target/concept drift or stalled data (e.g. data are stalled for > 2 hours) and send notifications to ML Engineers in that case.
 
 Also periodically (e.g. once a week) retrain the model. Use Data Collection Service to collect information from Analysts about anomalies that were not detected and add them to train data. 
 
 Thresholds and periods for each item/group of items can be set by Setting Service.
 
 Even when model will be put production, analytics should conduct random manual anomaly checks from time to time for sales that model considers as not anomal.
+
+When something happens and many alerts occur from multiple shops or items in one shops - they should be aggregated in one alert to prevent flood. Also flood can be caused by alerts that were already fired not long time ago - they must be muted. 
 
 ## Monitoring
 
