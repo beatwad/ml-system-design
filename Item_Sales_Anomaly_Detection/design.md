@@ -92,9 +92,9 @@ Features, that contain anomaly sale behaviour, must be excluded from the train d
 
 Use something like cron job, for each item category we fire with some period (1 hour, 2 hours, 8 hours, daily, weekly, etc., controled by Scheduler), prepare features, send them to model, make prediction, compare with item-specific threshold, notify Analysts if necessary. We also must detect the situation when data from some shop are stalled and don't make model to make predictions for that shop. All of this is done 
 
-Also have Monitoring Service which detects feature/target/concept drift or stalled data (e.g. data are stalled for > 2 hours) and send notifications to ML Engineers in that case.
+Also have Monitoring Service which detects feature/target/concept drift or stalled data (e.g. data are stalled for some time but usually at this time this shop's invoice rate is N - suspicious) and send notifications to ML Engineers in that case.
 
-Also periodically (e.g. once a week) retrain the model. Use Data Collection Service to collect information from Analysts about anomalies that were not detected and add them to train data. 
+Also periodically (e.g. once a week) retrain the model. Use Label Collection Service to collect information from Analysts about anomalies that were not detected and add them to the Train Data and a Golden Dataset on which new model's performance will be measured against old models. 
 
 Thresholds and periods for each item/group of items can be set by Setting Service.
 
