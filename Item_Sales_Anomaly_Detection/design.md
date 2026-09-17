@@ -30,8 +30,8 @@ Anomaly detection. We predict sales of pair item-shop or item for all shops for 
 For each item / item group we set the threshold (alpha) and if probabiltiy of item sales is smaller than this threshold - it's anomaly. More details about threshold in Model section.
 
 Offline metrics:
-- Recall (need to catch as many anomalies as possible)
-- Precision (minimize false alarams)
+- Recall (set minimum recall, model must not have recall less than that)
+- Precision (optimize it with fixed recall)
 - F-beta (beta > 1 because we care about Recall more)
 - PR-AUC
 
@@ -67,16 +67,21 @@ Need to have a feature storage which updates every hour/6 hours/day and then pre
 
 ## Model
 
-We want to minimize time of anomaly detection - need relatively simple model:
-- Linear Regression
-- RandomForest Regressor
-- Gradient Boosting
+We want to minimize time of anomaly detection - need relatively simple model, e.g. Gradient Boosting.
 
 We use GBDT with Poisson or Tweedie objective to predict the number of sales for every item-shop pair, because these objectives use a log link, so the prediction is always positive and multiplicative effects like seasonality and promos come naturally.
 
 We have 5000 invoices per hour, so fo some item-shop pairs we can predict rarely. Suppose we must predict for 100k pairs per hour. GBDTs like LightGBM or CatBoost are lightweight enough, 100K predictions/hour is okay for them and features will be prepared fast enough too.
 
-After we predict the sales next hour/day/week/etc., we use this prediction as lambda in e.g. Poisson distribution and predict the probability to get the same or less sales that we observe (i.e. cumulative probability of the left tail of distribution). And if it's less than a threshold (alpha) for that item or item-shop pair - we send an alert. alpha must be derived from false alert budget (not more than 5 false alerts per day -> not more than 1 false alert per 3 hours).
+After we predict the sales next hour/day/week/etc., we use this prediction as parameter lambda in Poisson distribution and predict the probability to get the same or less sales that we observe (i.e. cumulative probability of the left tail of distribution). And if it's less than a threshold (alpha) for that item or item-shop pair - we send an alert. Alpha must be derived from false alert budget (not more than 5 false alerts per day -> ~2.4M checks per day -> alpha ~ 2e-6).
+
+But Poisson assumes variance = mean (lambda), while real sales are overdispersed -> real alert rate will be much higher than alpha implies. So at the scoring step we can also use Negative Binomial (Pascal) distribution: GBDT predicts the mean of Poisson distribution, then dispersion `r` is estimated per item category from residuals (var = lambda + lambda^2 / r) and used in NB as one of it's parameter, second parameter `p` we get by formula p = r / (r + lambda). 
+
+But before that we should evaluate var: just calculate mean square of difference between model predictions and target `var_hat`. If var_hat < lambda, then the sales are not overdispersed - we use Poisson, else we use NB. 
+
+Calibration must be checked before we trust alpha:
+- randomized PIT histogram on holdout must be flat (if the left tail is too heavy - increase dispersion)
+- backtest the number of alerts on a quiet historical period and tune alpha to fit into 5 alerts per day
 
 ## Train
 
@@ -84,13 +89,13 @@ Prepare features and target, use TSS. Use SMEs to show which of sales drops are 
 
 Also consider adding of syntetic sales falls cause their historical number is ~240 and this is a very small value for 60M rows dataset - this will help us to make Offline metrics not so noisy.
 
-The majority of items are sold rarely -> except different threshold we should also predict more frequently for some items and less frequently for others. Check frequency should be computed for each item-shop pair, if some items are sold rarely, we can discard that pairs and watch at the gloabl sales of these items.
+The majority of items are sold rarely -> except different threshold we should also predict more frequently for some items and less frequently for others. Check frequency should be computed for each item-shop pair: window with zero sales can be alerted only if expected sales in it Lambda > ln(1/alpha) (alpha ~ 2e-6 -> Lambda > 13), so the period is the time needed to accumulate that many expected sales. If this period is too long - discard that pair and watch at the global sales of these items.
 
 Features, that contain anomaly sale behaviour, must be excluded from the train dataset - model must not treat them as kind of normal behaviour. E.g. we can replace them with mean of previous and next sales (if both of them ok).
 
 ## Inference
 
-Use something like cron job, for each item category we fire with some period (1 hour, 2 hours, 8 hours, daily, weekly, etc., controled by Scheduler), prepare features, send them to model, make prediction, compare with item-specific threshold, notify Analysts if necessary. We also must detect the situation when data from some shop are stalled and don't make model to make predictions for that shop. All of this is done 
+Use something like cron job, for each item category we fire with some period (1 hour, 2 hours, 8 hours, daily, weekly, etc., controled by Scheduler), prepare features, send them to model, make prediction, compare with item-specific threshold, notify Analysts if necessary. We also must detect the situation when data from some shop are stalled and don't make model to make predictions for that shop.
 
 Also have Monitoring Service which detects feature/target/concept drift or stalled data (e.g. data are stalled for some time but usually at this time this shop's invoice rate is N - suspicious) and send notifications to ML Engineers in that case.
 
@@ -100,7 +105,9 @@ Thresholds and periods for each item/group of items can be set by Setting Servic
 
 Even when model will be put production, analytics should conduct random manual anomaly checks from time to time for sales that model considers as not anomal.
 
-When something happens and many alerts occur from multiple shops or items in one shops - they should be aggregated in one alert to prevent flood. Also flood can be caused by alerts that were already fired not long time ago - they must be muted. 
+When something happens and many alerts occur from multiple shops or items in one shops - they should be aggregated in one alert to prevent flood. Also flood can be caused by alerts that were already fired not long time ago - they must be muted.
+
+Every month Report Service collects information from logs and sends it to Project Manager.
 
 ## Monitoring
 
