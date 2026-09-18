@@ -34,6 +34,7 @@ Offline metrics:
 - Precision (optimize it with fixed recall)
 - F-beta (beta > 1 because we care about Recall more)
 - PR-AUC
+- Detection delay - average number of time slots between anomaly appears and alert fires
 
 ## Online metrics
 
@@ -77,7 +78,9 @@ After we predict the sales next hour/day/week/etc., we use this prediction as pa
 
 But Poisson assumes variance = mean (lambda), while real sales are overdispersed -> real alert rate will be much higher than alpha implies. So at the scoring step we can also use Negative Binomial (Pascal) distribution: GBDT predicts the mean of Poisson distribution, then dispersion `r` is estimated per item category from residuals (var = lambda + lambda^2 / r) and used in NB as one of it's parameter, second parameter `p` we get by formula p = r / (r + lambda). 
 
-But before that we should evaluate var: just calculate mean square of difference between model predictions and target `var_hat`. If var_hat < lambda, then the sales are not overdispersed - we use Poisson, else we use NB. 
+But before that we should evaluate var: just calculate mean square of difference between model predictions and target `var_hat`. If var_hat < mu_bar (average lambda, calculated from sample), then the sales are not overdispersed - we use Poisson, else we use NB. 
+
+`r` is re-estimated on every retrain together with the model, and separately for every scoring window (hour / day / week) and for group levels (shop, item) - dispersion of hourly counts doesn't transfer to daily ones and sales inside a group are correlated.
 
 Calibration must be checked before we trust alpha:
 - randomized Probability Integral Transform (PIT - checks the calibration of predicted descrete distribution, i.e. it checks the similarity of current **descrete** distribution and expected descrete distribution with some parameters) histogram on holdout must be flat (if the left tail is too heavy - increase dispersion)
@@ -101,7 +104,7 @@ Also have Monitoring Service which detects feature/target/concept drift or stall
 
 Analyst must close every fired alert with a verdict (real anomaly / false alarm + reason: promo, price change, delisting, data problem, etc.). Label Collection Service stores these verdicts together with anomalies that were not detected, so we get labels for both classes - without them online precision (real anomalies / all notifications) and the number of false alarms can not be computed.
 
-Also periodically (e.g. once a week) retrain the model. Verdicts and missed anomalies are added to the Train Data and to a Golden Dataset (GD) on which new model's performance will be measured against old models. New model is sent to production only if GD measurement shows that it's not worse than previous model and backtest of alerts number less than our daily false alert budget.
+Also periodically (e.g. once a week) retrain the model. Verdicts and missed anomalies are added to the Train Data and to a Golden Dataset (GD) on which new model's performance will be measured against old models. New model is sent to production only if GD measurement shows that it's not worse than previous model, backtest of alerts number less than our daily false alert budget and delay not more than for previous model.
 
 Thresholds and periods for each item/group of items can be set by Setting Service.
 
@@ -139,7 +142,9 @@ Use monitoring metrics for AB-test control.
 
 If new item appears in stock: just wait for some time until we collect enough data about this item sales in that shop and retrain model on them + can use information about this item's sales from nearby shops (if that item exists for some time in the shops nearby). Same for the new shop - wait for data to collect + use information from nearby shops.
 
-If feature storage of model is failed - notify analysts and ML engineers about the situation.
+If Feature Storage or Model is failed - use simple rule like comparing of current sales with median of sales for the last week/month or use business rules that were previously developed by analysts, also notify analysts and ML engineers about the situation.
+
+If Model Storage is failed - continue use current model and notify ML engineers about the situation.
 
 If number of false notifications or missed anomalies rise dramatically (e.g. +100%) - notify ML Engineers, switch back to previous version of model if neccessary or retrain new model.
 
