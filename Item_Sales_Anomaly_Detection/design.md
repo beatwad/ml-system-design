@@ -80,7 +80,7 @@ But Poisson assumes variance = mean (lambda), while real sales are overdispersed
 But before that we should evaluate var: just calculate mean square of difference between model predictions and target `var_hat`. If var_hat < lambda, then the sales are not overdispersed - we use Poisson, else we use NB. 
 
 Calibration must be checked before we trust alpha:
-- randomized PIT histogram on holdout must be flat (if the left tail is too heavy - increase dispersion)
+- randomized Probability Integral Transform (PIT - checks the calibration of predicted descrete distribution, i.e. it checks the similarity of current **descrete** distribution and expected descrete distribution with some parameters) histogram on holdout must be flat (if the left tail is too heavy - increase dispersion)
 - backtest the number of alerts on a quiet historical period and tune alpha to fit into 5 alerts per day
 
 ## Train
@@ -99,13 +99,17 @@ Use something like cron job, for each item category we fire with some period (1 
 
 Also have Monitoring Service which detects feature/target/concept drift or stalled data (e.g. data are stalled for some time but usually at this time this shop's invoice rate is N - suspicious) and send notifications to ML Engineers in that case.
 
-Also periodically (e.g. once a week) retrain the model. Use Label Collection Service to collect information from Analysts about anomalies that were not detected and add them to the Train Data and a Golden Dataset on which new model's performance will be measured against old models. 
+Analyst must close every fired alert with a verdict (real anomaly / false alarm + reason: promo, price change, delisting, data problem, etc.). Label Collection Service stores these verdicts together with anomalies that were not detected, so we get labels for both classes - without them online precision (real anomalies / all notifications) and the number of false alarms can not be computed.
+
+Also periodically (e.g. once a week) retrain the model. Verdicts and missed anomalies are added to the Train Data and to a Golden Dataset (GD) on which new model's performance will be measured against old models. New model is sent to production only if GD measurement shows that it's not worse than previous model and backtest of alerts number less than our daily false alert budget.
 
 Thresholds and periods for each item/group of items can be set by Setting Service.
 
 Even when model will be put production, analytics should conduct random manual anomaly checks from time to time for sales that model considers as not anomal.
 
-When something happens and many alerts occur from multiple shops or items in one shops - they should be aggregated in one alert to prevent flood. Also flood can be caused by alerts that were already fired not long time ago - they must be muted.
+When something happens and many alerts occur from multiple shops or items in one shop - they should be aggregated in one alert to prevent flood. We also score two group levels: shop (Lambda = sum of lambda over all pairs of that shop, observed = sum of their sales) and item (the same over all shops). Groups are checked first, the alert is fired from the highest level that explains the drop and pair alerts are attached to it as details. Dispersion `r` for a group is estimated separately - sales inside a shop are correlated, so the sum of NB is not NB with the same `r`, and group thresholds must be backtested on their own level. Alert budget (5 per day) is split between the three levels, e.g. 2 / 2 / 1, otherwise new levels just add tests and break the budget.
+
+Remaining alerts are sorted by expected loss `(Lambda - observed) * price`. Alerts already fired for the same series not long time ago (e.g. 24 hours) are muted, mute is released earlier if the drop becomes significantly deeper.
 
 Every month Report Service collects information from logs and sends it to Project Manager.
 
@@ -114,10 +118,12 @@ Every month Report Service collects information from logs and sends it to Projec
 - feature/target/concept drift
 - number of notifications for some period of time
 - number of missed anomalies for some period of time
+- number of alerts at global shop / global alert / local shop-item level
+- PIT calibration drift
 
 ## AB-test
 
-Run the model in parallel with analysts for e.g. a month + add a synthetic anomalies to increase the amount of data (10 anomalies per month is not enough for reliable test).
+Use shadow mode instead classic AB-test. Run the model in parallel with analysts for e.g. a month + add a synthetic anomalies to increase the amount of data (10 anomalies per month is not enough for reliable test).
 
 Primary metrics:
 - recall, must not be significantly worth than analysts recall
