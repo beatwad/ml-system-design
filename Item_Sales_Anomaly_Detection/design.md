@@ -100,6 +100,8 @@ Features, that contain anomaly sale behaviour, must be excluded from the train d
 
 Use something like cron job, for each item category we fire with some period (1 hour, 2 hours, 8 hours, daily, weekly, etc., controled by Scheduler), prepare features, send them to model, make prediction, compare with item-specific threshold, notify Analysts if necessary. We also must detect the situation when data from some shop are stalled and don't make model to make predictions for that shop.
 
+Alert contains: what (item / shop / item-shop pair) and when (scoring window), expected Lambda vs observed sales, sales history for N previous windows, estimated loss `(Lambda - observed) * price` and hint features that could explain the drop (promo, price change, OOS, sales of that item in nearby shops).
+
 Also have Monitoring Service which detects feature/target/concept drift or stalled data (e.g. data are stalled for some time but usually at this time this shop's invoice rate is N - suspicious) and send notifications to ML Engineers in that case.
 
 Analyst must close every fired alert with a verdict (real anomaly / false alarm + reason: promo, price change, delisting, data problem, etc.). Label Collection Service stores these verdicts together with anomalies that were not detected, so we get labels for both classes - without them online precision (real anomalies / all notifications) and the number of false alarms can not be computed.
@@ -148,7 +150,7 @@ If Model Storage is failed - continue use current model and notify ML engineers 
 
 If number of false notifications or missed anomalies rise dramatically (e.g. +100%) - notify ML Engineers, switch back to previous version of model if neccessary or retrain new model.
 
-## Data
+## Storage
 
 60M of invoices for 2 years + aggregates + features, suppose 1 kB per invoice -> ~60 GB of data + 30 GB of new data each year - one 1 TB SSD disk is enough for the next 5 years.
 
@@ -156,6 +158,6 @@ If number of false notifications or missed anomalies rise dramatically (e.g. +10
 
 Models are light, compute of features can take time. Suppose it's 100k of pairs item-shop every hour, each pair has 1kB of features to genearate -> 100 MB of data to process every hour. Even weak hardware can handle it.
 
-## Compute and Latency
+## Latency
 
- Model takes microseconds. Million of rows for one GBDT per 1 CPU core is ~30 secs, 100k -> 3 secs, multiple CPU cores decrease this time to less than a second. Feature preparation will take tens of seconds for million obects -> couple of seconds for 100k -> the latency of the whole system is less than a 10-20 secs even on weak hardware.
+Model takes microseconds. Million of rows for one GBDT per 1 CPU core is ~30 secs, 100k -> 3 secs, multiple CPU cores decrease this time to less than a second. Feature preparation will take tens of seconds for million obects -> couple of seconds for 100k -> the latency of the whole system is less than a 10-20 secs even on weak hardware.
