@@ -1,0 +1,2 @@
+- ETA (Estimated Time of Arrival) prediction for taxi service
+- Demand forecasting (e.g. inventory for a retailer)
