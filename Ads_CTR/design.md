@@ -116,4 +116,41 @@ Target: a click within N minutes of the impression, don't consider accidental cl
 Negative downsampling: ~10^9 impressions/day with ~1% CTR, so we keep only a fraction `w` of negatives. It inflates predicted CTR, so we recalibrate the output:
 `p = p' / (p' + (1 - p') / w)`, where `p'` - prediction of the model trained on downsampled data
 
+# Train
+
+Time series split, gap N minutes between train and validation. 
+- at first train retriever: for each user select ads that were clicked, add ads that were shown but not clicked + ads that *never shown* (they will be negatives with a high probability too) and train using InfoNCE with in-batch negatives + logQ correction, plus explicit shown-not-clicked negatives. logQ correction - subtract the log of each ad's sampling probability from logit: `s_corrected(u, a) = s(u, a) − log P(a)`. This is was originally done to prevent sampling bias for popular ads, because they often appear in batch as negative ones, so that leads to situation when model learns that popular -> low score. It was calculated that the size of that bias is -log P(a) -> add this correction term to loss to cancel the extra penalty from appearing as a negative so often.
+- then train reranker, pointwise with BCE on all logged impressions, with uniform negative downsampling
+- then distill reranker into retriever using soft labels + add hard negatives and positives
+
+Retrain: do a daily full retrain and hourly incremental updates, cause ads and campaigns change fast.
+
+# Inference
+
+What triggers the ad recommendation? User launches the app / opens the site / swipes feed / any other action that leads to ad show.
+
+We get user embedding, pre-filter available ads by age, region restrictions, frequency (was shown to that user less than M minutes before) etc.
+
+We get ad embedding, we load history of it's interactions with various user categories (e.g CTR counters). CTR is calculated using formula `(clicks + α·category_CTR) / (impressions + α)`, that means that if ad wasn't shown, clicks = impressions = 0 and we use avg CTR of the corresponding ad category.
+
+For the current user embedding we search for top K (e.g. 500) most similar ads, then rerank them, then apply calibration (downsampling correction, **isotonic scaling** - a post-hoc calibration using a separate small function that maps raw scores to calibrated probabilities), compute bid × pCTR per candidate, pick the winners, set the price. Then we show the winners that was not shown to user for a some time (e.g. 1 hour).
+
+If isotonic scaling is used:
+- apply if after downsampling correction
+- refit it daily or hourly
+- optionally fit it per segment (country, surface, new vs. established ads, etc.)
+
+Log the exact feature values used together with the impression, and build training data from those logs for further retraining.
+
+# A/B testing
+
+# Monitoring
+
+# Fallback
+
+# Compute
+
+# Latency
+
+# Memory
 
