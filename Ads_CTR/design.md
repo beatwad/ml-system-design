@@ -146,13 +146,73 @@ Log the exact feature values used together with the impression, and build traini
 
 # A/B testing
 
+## Primary
+- Revenue per Mille
+
+## Guardrails
+- User time spent
+- Predicted/Observed click ratio
+- Ad complain/hide ratio
+
+## Secondary
+- Advertiser CVR/ROI
+- Avg Impression duration (normalized per ad format)
+
+- Randomize by user.
+- Use budget-split testing: advertiser budgets are shared, so one arm can spend the other's budget and inflate its own RPM.
+- Run ≥1–2 weeks for weekly seasonality and novelty effects.
+- Keep a long-term holdout to measure the effect of ad load on retention.
+
 # Monitoring
+- Predicted/observed click ratio
+- RPM
+- CTR
+- Ad complain/hide ratio
+- Avg session length
+- Avg user time spent
+- Feature/Target/Concept drift
+- Model latency (median, p99)
+
+In case of calibration drift - refit isotonic calibration
+In any other case case when some of monitoring parameter deteriorates signifincantly - send notification to Operator
 
 # Fallback
+- Reranker fails - fall back to the previous reranker version. If none is available, use the smoothed historical CTR counters as pCTR; they're calibrated by construction.
+- Retriever fails - use precomputed cache of top ads per user segment, ranked by smoothed historical CTR, refreshed hourly
+- New model/features shows significantly worse performance - return previous version of model/feature
+- Filter service - show only ad without age/region restrictions
 
 # Compute
 
+Assumptions: ~10^6 active ads, peak 3.5*10^4 RPS, K = 500 candidates, A100 ~ 3.12*10^14 FLOP/s fp16 with MFU ~0.3.
+
+Online:
+- Reranker (DCN-v2 + DIN): ~40 MFLOP per candidate -> 500 * 4*10^7 = 2*10^10 FLOP per request -> 3.5*10^4 * 2*10^10 = 7*10^14 FLOP/s at peak -> ~7 GPU at 100% util, ~12 GPU at 60% util, x2-3 for regions/redundancy -> ~30 GPU. On CPU it would be ~10-20k cores, so GPU is cheaper.
+- Retriever: user tower is a small MLP, negligible. Filtered ANN (HNSW) over 10^6 ads ~1-2 ms per query on 1 core -> 3.5*10^4 * 2 ms = 70 cores -> ~100-150 CPU cores.
+- Feature store: ~100 keys per request (user features, user x category counters, DIN history) -> 3.5*10^6 lookups/s -> sharded Redis. Ad-side features (10^6 ads * ~1 KB = 1 GB) are cached locally in every reranker node and refreshed every minute, so 500 candidates don't need 500 remote lookups.
+
+Offline:
+- Training data: 10^9 impressions/day, keep w = 0.1 of negatives -> ~1.1*10^8 rows/day.
+- Full retrain on 30 days: 3.3*10^9 rows * 3 * 4*10^7 FLOP = 4*10^17 FLOP -> ~1-2 GPU-hours of pure compute. In practice bound by embedding lookups and data I/O -> ~2-4 hours on 8-16 GPU, daily.
+- Hourly incremental update: ~5*10^6 rows -> minutes.
+- Ad embedder runs only on ad creation/update -> negligible.
+
 # Latency
 
+Budget: p99 < 100 ms.
+- User features + user embedding: 5-10 ms (in parallel)
+- Filtered ANN top-500: 5-10 ms
+- Ad features from local cache: ~1 ms
+- Reranker, 500 candidates in one GPU batch: 5-15 ms (+ few ms of dynamic batching queue)
+- Calibration + auction + business rules: ~1-2 ms
+- Logging: async, 0 ms
+- Network/serialization: 10-20 ms
+- Total: ~40-60 ms median, p99 < 100 ms. If over budget: lower K (500 -> 200), cache user embedding per session.
+
 # Memory
+
+- ID embedding tables: users active in last 30 days ~3*10^8 * 64 * 2B (fp16) = ~40 GB, ads 10^7 * 64 * 2B = ~1.3 GB -> fit on one 80 GB GPU or sharded across 2-4 GPUs. Dense part (cross layers + MLP + DIN) ~10^7 params = ~20-40 MB, replicated.
+- Vector DB: 10^6 ads * 128 * 4B = 0.5 GB + HNSW graph -> ~1 GB, replicated in every retriever node.
+- Feature store: ~200 user features + user x category counters (100 categories * 3 windows * 2 counts * 4B = 2.4 KB) + DIN history (100 recent ad interactions * ~16B = 1.6 KB) -> ~5 KB per user * 10^9 = ~5 TB on SSD KV. Hot subset (10^8 DAU) ~500 GB in RAM.
+- Logs: 10^9 impressions/day * ~2 KB of logged features = ~2 TB/day -> ~180 TB for 90 days retention in cold storage (S3/HDFS).
 
