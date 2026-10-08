@@ -184,16 +184,16 @@ In any other case case when some of monitoring parameter deteriorates signifinca
 
 # Compute
 
-Assumptions: ~10^6 active ads, peak 3.5*10^4 RPS, K = 500 candidates, A100 ~ 3.12*10^14 FLOP/s fp16 with MFU ~0.3.
+Assumptions: ~10^6 active ads, peak 3.5x10^4 RPS, K = 500 candidates, A100 ~ 3.12x10^14 FLOP/s fp16 with MFU ~0.3.
 
 Online:
-- Reranker (DCN-v2 + DIN): ~40 MFLOP per candidate -> 500 * 4*10^7 = 2*10^10 FLOP per request -> 3.5*10^4 * 2*10^10 = 7*10^14 FLOP/s at peak -> ~7 GPU at 100% util, ~12 GPU at 60% util, x2-3 for regions/redundancy -> ~30 GPU. On CPU it would be ~10-20k cores, so GPU is cheaper.
-- Retriever: user tower is a small MLP, negligible. Filtered ANN (HNSW) over 10^6 ads ~1-2 ms per query on 1 core -> 3.5*10^4 * 2 ms = 70 cores -> ~100-150 CPU cores.
-- Feature store: ~100 keys per request (user features, user x category counters, DIN history) -> 3.5*10^6 lookups/s -> sharded Redis. Ad-side features (10^6 ads * ~1 KB = 1 GB) are cached locally in every reranker node and refreshed every minute, so 500 candidates don't need 500 remote lookups.
+- Reranker (DCN-v2 + DIN): ~40 MFLOP per candidate -> 500 * 4x10^7 = 2x10^10 FLOP per request -> 3.5x10^4 x 2x10^10 = 7x10^14 FLOP/s at peak -> ~7 GPU at 100% util, ~12 GPU at 60% util, x2-3 for regions/redundancy -> ~30 GPU. On CPU it would be ~10-20k cores, so GPU is cheaper.
+- Retriever: user tower is a small MLP, negligible. Filtered ANN (HNSW) over 10^6 ads ~1-2 ms per query on 1 core -> 3.5x10^4 * 2 ms = 70 cores -> ~100-150 CPU cores.
+- Feature store: ~100 keys per request (user features, user x category counters, DIN history) -> 3.5x10^6 lookups/s -> sharded Redis. Ad-side features (10^6 ads x ~1 KB = 1 GB) are cached locally in every reranker node and refreshed every minute, so 500 candidates don't need 500 remote lookups.
 
 Offline:
 - Training data: 10^9 impressions/day, keep w = 0.1 of negatives -> ~1.1*10^8 rows/day.
-- Full retrain on 30 days: 3.3*10^9 rows * 3 * 4*10^7 FLOP = 4*10^17 FLOP -> ~1-2 GPU-hours of pure compute. In practice bound by embedding lookups and data I/O -> ~2-4 hours on 8-16 GPU, daily.
+- Full retrain on 30 days: 3.3x10^9 rows x 3 x 4x10^7 FLOP = 4x10^17 FLOP -> ~1-2 GPU-hours of pure compute. In practice bound by embedding lookups and data I/O -> ~2-4 hours on 8-16 GPU, daily.
 - Hourly incremental update: ~5*10^6 rows -> minutes.
 - Ad embedder runs only on ad creation/update -> negligible.
 
